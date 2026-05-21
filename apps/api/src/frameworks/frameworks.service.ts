@@ -9,6 +9,7 @@ import {
   getOverviewScores,
   getCurrentMember,
   computeFrameworkComplianceScore,
+  computeFrameworkReadinessProgressScore,
 } from './frameworks-scores.helper';
 import { upsertOrgFrameworkStructure } from './frameworks-upsert.helper';
 import { createTimelinesForFrameworks } from './frameworks-timeline.helper';
@@ -188,6 +189,7 @@ export class FrameworksService {
         tasks,
         evidenceSubmissions,
       ),
+      readinessProgressScore: computeFrameworkReadinessProgressScore(fw, tasks),
     }));
   }
 

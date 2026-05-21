@@ -1,11 +1,11 @@
-import { render, screen } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  setMockPermissions,
   ADMIN_PERMISSIONS,
   AUDITOR_PERMISSIONS,
   mockHasPermission,
+  setMockPermissions,
 } from '@/test-utils/mocks/permissions';
+import { render, screen } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/hooks/use-permissions', () => ({
   usePermissions: () => ({
@@ -23,9 +23,7 @@ vi.mock('@trycompai/ui/dialog', () => ({
 }));
 
 vi.mock('@trycompai/ui/scroll-area', () => ({
-  ScrollArea: ({ children }: { children: React.ReactNode }) => (
-    <div>{children}</div>
-  ),
+  ScrollArea: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
 }));
 
 vi.mock('next/navigation', () => ({
@@ -46,6 +44,7 @@ const baseProps = {
   allFrameworks: [],
   frameworksWithCompliance: [],
   organizationId: 'org_123',
+  overallComplianceScore: 0,
 };
 
 describe('FrameworksOverview permission gating', () => {

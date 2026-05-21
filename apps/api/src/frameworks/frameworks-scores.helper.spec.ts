@@ -29,6 +29,7 @@ import { db } from '@db';
 import { filterComplianceMembers } from '../utils/compliance-filters';
 import {
   computeFrameworkComplianceScore,
+  computeFrameworkReadinessProgressScore,
   getOverviewScores,
 } from './frameworks-scores.helper';
 
@@ -393,6 +394,55 @@ describe('frameworks-scores.helper', () => {
       expect(computeFrameworkComplianceScore(framework, [sharedTask], [])).toBe(
         67,
       );
+    });
+  });
+
+  describe('computeFrameworkReadinessProgressScore', () => {
+    it('counts built-in draft policies and todo tasks as truthful setup progress, not compliance', () => {
+      const framework = {
+        controls: [
+          {
+            id: 'c1',
+            policies: [{ id: 'p1', status: 'draft' }],
+            controlDocumentTypes: [],
+          },
+          {
+            id: 'c2',
+            policies: [{ id: 'p2', status: 'draft' }],
+            controlDocumentTypes: [],
+          },
+        ],
+      };
+      const tasks = [
+        { id: 't1', status: 'todo', controls: [{ id: 'c1' }] },
+        { id: 't2', status: 'todo', controls: [{ id: 'c2' }] },
+      ];
+
+      expect(computeFrameworkComplianceScore(framework, tasks, [])).toBe(0);
+      expect(computeFrameworkReadinessProgressScore(framework, tasks)).toBe(50);
+    });
+
+    it('increases readiness progress for review and completed states', () => {
+      const framework = {
+        controls: [
+          {
+            id: 'c1',
+            policies: [{ id: 'p1', status: 'needs_review' }],
+            controlDocumentTypes: [],
+          },
+          {
+            id: 'c2',
+            policies: [{ id: 'p2', status: 'published' }],
+            controlDocumentTypes: [],
+          },
+        ],
+      };
+      const tasks = [
+        { id: 't1', status: 'in_review', controls: [{ id: 'c1' }] },
+        { id: 't2', status: 'done', controls: [{ id: 'c2' }] },
+      ];
+
+      expect(computeFrameworkReadinessProgressScore(framework, tasks)).toBe(91);
     });
   });
 

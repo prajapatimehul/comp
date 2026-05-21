@@ -89,3 +89,51 @@ export function computeFrameworkComplianceScore(
   const completed = policiesCompleted + tasksCompleted + documentsCompleted;
   return Math.round((completed / totalArtifacts) * 100);
 }
+
+export function computeFrameworkReadinessProgressScore(
+  framework: FrameworkWithControlsForScoring,
+  tasks: TaskWithControls[],
+): number {
+  const controls = framework.controls ?? [];
+  if (controls.length === 0) return 0;
+
+  const controlIds = new Set(controls.map((control) => control.id));
+  const policiesById = new Map<string, { id: string; status: string }>();
+  for (const control of controls) {
+    for (const policy of control.policies ?? []) {
+      policiesById.set(policy.id, policy);
+    }
+  }
+
+  const tasksById = new Map<string, TaskWithControls>();
+  for (const task of tasks) {
+    if (task.controls.some((control) => controlIds.has(control.id))) {
+      tasksById.set(task.id, task);
+    }
+  }
+
+  const totalArtifacts = policiesById.size + tasksById.size;
+  if (totalArtifacts === 0) return 0;
+
+  const policyProgress = Array.from(policiesById.values()).reduce(
+    (sum, policy) => {
+      if (policy.status === 'published') return sum + 1;
+      if (policy.status === 'needs_review') return sum + 0.75;
+      if (policy.status === 'draft') return sum + 0.5;
+      return sum;
+    },
+    0,
+  );
+
+  const taskProgress = Array.from(tasksById.values()).reduce((sum, task) => {
+    if (task.status === 'done' || task.status === 'not_relevant') {
+      return sum + 1;
+    }
+    if (task.status === 'in_review') return sum + 0.9;
+    if (task.status === 'in_progress') return sum + 0.75;
+    if (task.status === 'todo') return sum + 0.5;
+    return sum;
+  }, 0);
+
+  return Math.round(((policyProgress + taskProgress) / totalArtifacts) * 100);
+}

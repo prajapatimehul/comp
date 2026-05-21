@@ -27,4 +27,5 @@ export type FrameworkInstanceWithControls = FrameworkInstance & {
 export interface FrameworkInstanceWithComplianceScore {
   frameworkInstance: FrameworkInstanceWithControls;
   complianceScore: number;
+  readinessProgressScore?: number;
 }

@@ -1,17 +1,17 @@
 'use client';
 
+import { usePermissions } from '@/hooks/use-permissions';
+import type { FrameworkInstanceWithControls } from '@/lib/types/framework';
+import type { FrameworkEditorFramework } from '@db';
+import { Add } from '@trycompai/design-system/icons';
 import { Button } from '@trycompai/ui/button';
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@trycompai/ui/card';
 import { Dialog } from '@trycompai/ui/dialog';
 import { ScrollArea } from '@trycompai/ui/scroll-area';
-import type { FrameworkEditorFramework } from '@db';
-import { Add } from '@trycompai/design-system/icons';
 import Image from 'next/image';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useState } from 'react';
-import { usePermissions } from '@/hooks/use-permissions';
-import type { FrameworkInstanceWithControls } from '@/lib/types/framework';
 import { AddFrameworkModal } from './AddFrameworkModal';
 import type { FrameworkInstanceWithComplianceScore } from './types';
 
@@ -24,11 +24,7 @@ export interface FrameworksOverviewProps {
 }
 
 export function mapFrameworkToBadge(framework: FrameworkInstanceWithControls) {
-  const frameworkName = (
-    framework.framework?.name ??
-    framework.customFramework?.name ??
-    ''
-  ).trim();
+  const frameworkName = (framework.framework?.name ?? framework.customFramework?.name ?? '').trim();
   const normalizedName = frameworkName.toLowerCase();
 
   if (frameworkName === 'SOC 2') {
@@ -83,13 +79,17 @@ export function FrameworksOverview({
   const complianceMap = new Map(
     frameworksWithCompliance?.map((f) => [f.frameworkInstance.id, f.complianceScore]) ?? [],
   );
+  const progressMap = new Map(
+    frameworksWithCompliance?.map((f) => [
+      f.frameworkInstance.id,
+      f.readinessProgressScore ?? f.complianceScore,
+    ]) ?? [],
+  );
 
   const availableFrameworksToAdd = allFrameworks.filter(
     (framework) =>
       !frameworksWithControls.some(
-        (fc) =>
-          fc.framework?.id === framework.id ||
-          fc.customFramework?.id === framework.id,
+        (fc) => fc.framework?.id === framework.id || fc.customFramework?.id === framework.id,
       ),
   );
 
@@ -115,15 +115,12 @@ export function FrameworksOverview({
             <div className="space-y-0 pr-4">
               {frameworksWithControls.map((framework, index) => {
                 const complianceScore = complianceMap.get(framework.id) ?? 0;
+                const progressScore = progressMap.get(framework.id) ?? complianceScore;
                 const badgeSrc = mapFrameworkToBadge(framework);
                 const displayName =
-                  framework.framework?.name ??
-                  framework.customFramework?.name ??
-                  '';
+                  framework.framework?.name ?? framework.customFramework?.name ?? '';
                 const displayDescription =
-                  framework.framework?.description ??
-                  framework.customFramework?.description ??
-                  '';
+                  framework.framework?.description ?? framework.customFramework?.description ?? '';
 
                 return (
                   <div key={framework.id}>
@@ -164,12 +161,14 @@ export function FrameworksOverview({
                                 <div
                                   className="bg-primary h-full rounded-full transition-all duration-300"
                                   style={{
-                                    width: `${complianceScore}%`,
+                                    width: `${progressScore}%`,
                                   }}
                                 />
                               </div>
                               <span className="text-xs text-muted-foreground tabular-nums text-right mt-1">
-                                {Math.round(complianceScore)}% compliant
+                                {complianceScore >= 100
+                                  ? `${Math.round(complianceScore)}% compliant`
+                                  : `${Math.round(progressScore)}% in progress`}
                               </span>
                             </div>
                           </div>

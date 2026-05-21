@@ -1,15 +1,18 @@
 import { serverApi } from '@/lib/api-server';
+import type { FrameworkInstanceWithControls } from '@/lib/types/framework';
 import type { FrameworkEditorFramework, Policy, Task } from '@db';
 import { PageHeader, PageLayout } from '@trycompai/design-system';
 import { Overview } from './components/Overview';
 import { OverviewTabs } from './components/OverviewTabs';
-import type { FrameworkInstanceWithControls } from '@/lib/types/framework';
 
 export async function generateMetadata() {
   return { title: 'Overview' };
 }
 
-type FrameworkWithScore = FrameworkInstanceWithControls & { complianceScore: number };
+type FrameworkWithScore = FrameworkInstanceWithControls & {
+  complianceScore: number;
+  readinessProgressScore?: number;
+};
 
 interface ScoresResponse {
   policies: {
@@ -35,7 +38,9 @@ export default async function OverviewPage({ params }: { params: Promise<{ orgId
 
   const [scoresRes, frameworksRes, availableRes] = await Promise.all([
     serverApi.get<ScoresResponse>('/v1/frameworks/scores'),
-    serverApi.get<{ data: FrameworkWithScore[] }>('/v1/frameworks?includeControls=true&includeScores=true'),
+    serverApi.get<{ data: FrameworkWithScore[] }>(
+      '/v1/frameworks?includeControls=true&includeScores=true',
+    ),
     serverApi.get<{ data: FrameworkEditorFramework[] }>('/v1/frameworks/available'),
   ]);
 
@@ -49,6 +54,7 @@ export default async function OverviewPage({ params }: { params: Promise<{ orgId
   const frameworksWithCompliance = frameworksData.map((fw: FrameworkWithScore) => ({
     frameworkInstance: { ...fw, complianceScore: undefined },
     complianceScore: fw.complianceScore ?? 0,
+    readinessProgressScore: fw.readinessProgressScore ?? fw.complianceScore ?? 0,
   }));
 
   return (
