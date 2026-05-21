@@ -47,17 +47,38 @@ export class ReadinessController {
   @UseGuards(HybridAuthGuard, PermissionGuard)
   @RequirePermissions([
     { resource: 'organization', actions: ['update'] },
-    { resource: 'policy', actions: ['create', 'update'] },
-    { resource: 'task', actions: ['create', 'update'] },
+    { resource: 'framework', actions: ['create'] },
     { resource: 'evidence', actions: ['create'] },
     { resource: 'vendor', actions: ['create', 'update'] },
     { resource: 'risk', actions: ['create', 'update'] },
   ])
   @ApiSecurity('apikey')
   @ApiOperation({
-    summary: 'Apply agent-produced readiness context and progress updates',
+    summary: 'Apply agent-produced onboarding context without fake completion',
   })
   async apply(@OrganizationId() organizationId: string, @Body() body: unknown) {
     return this.readinessService.applyReadiness(organizationId, body);
+  }
+
+  @Post('quarantine-generated')
+  @UseGuards(HybridAuthGuard, PermissionGuard)
+  @RequirePermissions([
+    { resource: 'organization', actions: ['update'] },
+    { resource: 'framework', actions: ['delete'] },
+    { resource: 'policy', actions: ['update'] },
+    { resource: 'task', actions: ['update'] },
+    { resource: 'evidence', actions: ['delete'] },
+    { resource: 'vendor', actions: ['update'] },
+    { resource: 'risk', actions: ['update'] },
+  ])
+  @ApiSecurity('apikey')
+  @ApiOperation({
+    summary: 'Quarantine legacy compctl-generated fake readiness data',
+  })
+  async quarantineGenerated(
+    @OrganizationId() organizationId: string,
+    @Body() body: unknown,
+  ) {
+    return this.readinessService.quarantineGenerated(organizationId, body);
   }
 }

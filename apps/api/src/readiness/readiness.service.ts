@@ -6,16 +6,9 @@ import {
 import {
   db,
   Departments,
-  EvidenceFormType,
-  Impact,
-  Likelihood,
   PolicyStatus,
-  Prisma,
   RiskCategory,
   RiskStatus,
-  RiskTreatmentType,
-  TaskAutomationStatus,
-  TaskFrequency,
   TaskStatus,
   VendorCategory,
   VendorStatus,
@@ -23,6 +16,7 @@ import {
 import { timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import { ApiKeyService } from '../auth/api-key.service';
+import { FrameworksService } from '../frameworks/frameworks.service';
 
 const registerSchema = z.object({
   companyName: z.string().trim().min(2),
@@ -47,11 +41,15 @@ const riskSchema = z.object({
 });
 
 const applySchema = z.object({
-  targetCompletion: z.number().min(0).max(1).default(0.9),
   repoContext: z.record(z.string(), z.unknown()).optional(),
   vendors: z.array(vendorSchema).default([]),
   risks: z.array(riskSchema).default([]),
+  framework: z.string().trim().min(1).default('SOC 2 Type 1'),
   markOnboardingComplete: z.boolean().default(true),
+});
+
+const quarantineSchema = z.object({
+  dryRun: z.boolean().default(false),
 });
 
 type RegisterInput = z.infer<typeof registerSchema>;
@@ -59,167 +57,71 @@ type ApplyInput = z.infer<typeof applySchema>;
 type VendorInput = z.infer<typeof vendorSchema>;
 type RiskInput = z.infer<typeof riskSchema>;
 
-const READINESS_FRAMEWORK_NAME = 'SOC 2 Type 1 Readiness';
+type SelectedFramework = {
+  id: string;
+  name: string;
+  description: string | null;
+};
 
-const READINESS_REQUIREMENTS = [
-  {
-    identifier: 'CC1',
-    name: 'Control Environment',
-    description: 'Policies, accountability, and governance are established.',
-    control: 'Governance and accountability controls',
-    policy: 'Information Security Policy',
-    tasks: [
-      'Approve information security policy',
-      'Assign security ownership and reporting lines',
-    ],
-    evidenceFormType: EvidenceFormType.board_meeting,
-  },
-  {
-    identifier: 'CC2',
-    name: 'Communication and Information',
-    description: 'Security responsibilities and evidence are communicated.',
-    control: 'Security communication controls',
-    policy: 'Acceptable Use Policy',
-    tasks: [
-      'Publish acceptable use requirements',
-      'Record security leadership meeting minutes',
-    ],
-    evidenceFormType: EvidenceFormType.it_leadership_meeting,
-  },
-  {
-    identifier: 'CC3',
-    name: 'Risk Assessment',
-    description: 'Risk assessment is performed and tracked.',
-    control: 'Risk assessment controls',
-    policy: 'Risk Management Policy',
-    tasks: ['Maintain risk register', 'Review risk treatment decisions'],
-    evidenceFormType: EvidenceFormType.risk_committee_meeting,
-  },
-  {
-    identifier: 'CC4',
-    name: 'Monitoring Activities',
-    description: 'Control monitoring and review cadence are operating.',
-    control: 'Monitoring and review controls',
-    policy: 'Monitoring Policy',
-    tasks: ['Review control monitoring results', 'Document follow-up actions'],
-    evidenceFormType: EvidenceFormType.meeting,
-  },
-  {
-    identifier: 'CC5',
-    name: 'Control Activities',
-    description: 'Access, change, and operational controls are defined.',
-    control: 'Operational control activities',
-    policy: 'Change Management Policy',
-    tasks: ['Document change approval workflow', 'Review production access'],
-    evidenceFormType: EvidenceFormType.access_request,
-  },
-  {
-    identifier: 'CC6',
-    name: 'Logical and Physical Access',
-    description: 'Access is authorized, reviewed, and removed timely.',
-    control: 'Access control safeguards',
-    policy: 'Access Control Policy',
-    tasks: ['Complete RBAC matrix review', 'Review privileged access'],
-    evidenceFormType: EvidenceFormType.rbac_matrix,
-  },
-  {
-    identifier: 'CC7',
-    name: 'System Operations',
-    description: 'Operations, detection, and incident response are tracked.',
-    control: 'System operations controls',
-    policy: 'Incident Response Policy',
-    tasks: [
-      'Run incident response tabletop exercise',
-      'Review security monitoring alerts',
-    ],
-    evidenceFormType: EvidenceFormType.tabletop_exercise,
-  },
-  {
-    identifier: 'CC8',
-    name: 'Change Management',
-    description: 'System changes are tested, reviewed, and deployed safely.',
-    control: 'Secure SDLC controls',
-    policy: 'Secure Software Development Policy',
-    tasks: ['Review GitHub branch protection', 'Document release approvals'],
-    evidenceFormType: EvidenceFormType.infrastructure_inventory,
-  },
-  {
-    identifier: 'CC9',
-    name: 'Risk Mitigation',
-    description: 'Third-party and operational risks are mitigated.',
-    control: 'Vendor and risk mitigation controls',
-    policy: 'Vendor Management Policy',
-    tasks: ['Assess critical vendors', 'Review vendor risk mitigations'],
-    evidenceFormType: EvidenceFormType.network_diagram,
-  },
-  {
-    identifier: 'A1',
-    name: 'Availability',
-    description: 'Availability commitments and recovery practices are tracked.',
-    control: 'Availability and continuity controls',
-    policy: 'Business Continuity Policy',
-    tasks: [
-      'Document backup and recovery inventory',
-      'Review cloud availability posture',
-    ],
-    evidenceFormType: EvidenceFormType.infrastructure_inventory,
-  },
-] as const;
+const LEGACY_FAKE_FRAMEWORK_NAME = 'SOC 2 Type 1 Readiness';
 
-const BASELINE_VENDORS: VendorInput[] = [
-  {
-    name: 'Amazon Web Services',
-    website: 'https://aws.amazon.com',
-    category: 'cloud',
-    description: 'Cloud infrastructure hosting, networking, monitoring, and storage.',
-    isSubProcessor: true,
-  },
-  {
-    name: 'GitHub',
-    website: 'https://github.com',
-    category: 'software_as_a_service',
-    description: 'Source control, code review, and CI/CD workflow provider.',
-    isSubProcessor: true,
-  },
+const LEGACY_FAKE_CONTROL_NAMES = [
+  'Governance and accountability controls',
+  'Security communication controls',
+  'Risk assessment controls',
+  'Monitoring and review controls',
+  'Operational control activities',
+  'Access control safeguards',
+  'System operations controls',
+  'Secure SDLC controls',
+  'Vendor and risk mitigation controls',
+  'Availability and continuity controls',
 ];
 
-const BASELINE_RISKS: RiskInput[] = [
-  {
-    title: 'Unauthorized cloud access',
-    category: 'technology',
-    description:
-      'Cloud IAM misconfiguration could allow unauthorized access to production infrastructure.',
-  },
-  {
-    title: 'Vendor concentration and third-party dependency',
-    category: 'vendor_management',
-    description:
-      'Critical customer-facing services depend on third-party cloud and SaaS providers.',
-  },
-  {
-    title: 'Incomplete security evidence before Type 1 audit',
-    category: 'governance',
-    description:
-      'Readiness evidence may be incomplete or stale without an explicit owner and cadence.',
-  },
+const LEGACY_FAKE_TASK_TITLES = [
+  'Approve information security policy',
+  'Assign security ownership and reporting lines',
+  'Publish acceptable use requirements',
+  'Record security leadership meeting minutes',
+  'Maintain risk register',
+  'Review risk treatment decisions',
+  'Review control monitoring results',
+  'Document follow-up actions',
+  'Document change approval workflow',
+  'Review production access',
+  'Complete RBAC matrix review',
+  'Review privileged access',
+  'Run incident response tabletop exercise',
+  'Review security monitoring alerts',
+  'Review GitHub branch protection',
+  'Document release approvals',
+  'Assess critical vendors',
+  'Review vendor risk mitigations',
+  'Document backup and recovery inventory',
+  'Review cloud availability posture',
 ];
+
+const LEGACY_FAKE_RISK_TREATMENT =
+  'Track owner, evidence, monitoring, and quarterly review cadence before Type 1 audit.';
 
 @Injectable()
 export class ReadinessService {
-  constructor(private readonly apiKeyService: ApiKeyService) {}
+  constructor(
+    private readonly apiKeyService: ApiKeyService,
+    private readonly frameworksService: FrameworksService,
+  ) {}
 
   async register(bootstrapToken: string | undefined, rawBody: unknown) {
     this.assertBootstrapToken(bootstrapToken);
     const input = registerSchema.parse(rawBody);
+    const frameworks = await this.resolveFrameworks(input.framework);
 
     const { user, organization, member, created } =
-      await this.upsertOrganization(input);
-
-    await this.ensureReadinessStructure({
-      organizationId: organization.id,
-      ownerMemberId: member.id,
-      targetCompletion: 0,
-    });
+      await this.upsertOrganization(input, frameworks);
+    const frameworkImport = await this.ensureBuiltInFrameworks(
+      organization.id,
+      frameworks,
+    );
 
     const apiKey = await this.apiKeyService.create(
       organization.id,
@@ -239,6 +141,7 @@ export class ReadinessService {
         apiKey: apiKey.key,
         apiUrl: this.getApiUrl(),
         appUrl: this.getAppUrl(organization.id),
+        frameworkImport,
         aws: {
           externalId: organization.id,
           roleAssumerArn: this.getRoleAssumerArn(),
@@ -247,7 +150,8 @@ export class ReadinessService {
           'compctl aws setup-role --profile crypto --external-id <organizationId> --principal-arn <roleAssumerArn>',
           'compctl aws connect --role-arn <roleArn> --regions eu-central-1',
           'compctl aws scan',
-          'compctl readiness apply --repo /Users/mehul/Desktop/projects/helvetia',
+          'compctl readiness quarantine-generated',
+          'compctl readiness apply --repo /path/to/customer/repo',
           'compctl readiness status',
         ],
       },
@@ -256,74 +160,235 @@ export class ReadinessService {
 
   async applyReadiness(organizationId: string, rawBody: unknown) {
     const input = applySchema.parse(rawBody);
-    const owner = await this.getOwnerMember(organizationId);
-
-    const structure = await this.ensureReadinessStructure({
+    const frameworks = await this.resolveFrameworks(input.framework);
+    const frameworkImport = await this.ensureBuiltInFrameworks(
       organizationId,
-      ownerMemberId: owner.id,
-      targetCompletion: input.targetCompletion,
-    });
-
-    const vendors = await this.upsertVendors(organizationId, [
-      ...BASELINE_VENDORS,
-      ...input.vendors,
-    ]);
-    const risks = await this.upsertRisks(organizationId, [
-      ...BASELINE_RISKS,
-      ...input.risks,
-    ]);
-    const evidence = await this.ensureEvidenceSubmissions(
-      organizationId,
-      owner.userId,
+      frameworks,
     );
     const context = await this.upsertContext(organizationId, input);
+    const vendors = await this.upsertCandidateVendors(
+      organizationId,
+      input.vendors,
+    );
+    const risks = await this.upsertCandidateRisks(organizationId, input.risks);
 
     if (input.markOnboardingComplete) {
-      await db.organization.update({
-        where: { id: organizationId },
-        data: {
-          onboardingCompleted: true,
-          hasAccess: true,
-        },
-      });
-      await db.onboarding.upsert({
-        where: { organizationId },
-        create: {
-          organizationId,
-          policies: true,
-          employees: true,
-          vendors: true,
-          integrations: true,
-          risk: true,
-          team: true,
-          tasks: true,
-          triggerJobCompleted: true,
-        },
-        update: {
-          policies: true,
-          vendors: true,
-          integrations: true,
-          risk: true,
-          team: true,
-          tasks: true,
-          triggerJobCompleted: true,
-          triggerJobId: null,
-        },
-      });
+      await this.completeCliOnboarding(organizationId);
     }
 
     const status = await this.getStatus(organizationId);
     return {
       success: true,
       data: {
-        structure,
-        vendors: { upserted: vendors.length, names: vendors.map((v) => v.name) },
-        risks: { upserted: risks.length, titles: risks.map((r) => r.title) },
-        evidence,
+        mode: 'api-flow-no-fake-completion',
+        frameworkImport,
         context,
+        vendors: {
+          upserted: vendors.length,
+          names: vendors.map((v) => v.name),
+          status: 'not_assessed_or_existing',
+        },
+        risks: {
+          upserted: risks.length,
+          titles: risks.map((r) => r.title),
+          status: 'pending_or_existing',
+        },
+        evidence: {
+          created: 0,
+          approved: 0,
+          note: 'compctl does not create or approve evidence. Evidence remains pending until a user uploads and reviews it.',
+        },
+        tasks: {
+          completedByCompctl: 0,
+          note: 'Tasks imported from built-in templates remain todo until completed through the normal task workflow.',
+        },
+        policies: {
+          publishedByCompctl: 0,
+          note: 'Policies imported from built-in templates remain draft until a user publishes them.',
+        },
         status: status.data,
       },
     };
+  }
+
+  async quarantineGenerated(organizationId: string, rawBody: unknown) {
+    const input = quarantineSchema.parse(rawBody ?? {});
+    const now = new Date();
+
+    const [
+      legacyFrameworks,
+      legacyTasks,
+      legacyControls,
+      evidenceSubmissions,
+      policies,
+      vendors,
+      risks,
+    ] = await Promise.all([
+      db.customFramework.findMany({
+        where: { organizationId, name: LEGACY_FAKE_FRAMEWORK_NAME },
+        select: { id: true },
+      }),
+      db.task.findMany({
+        where: {
+          organizationId,
+          taskTemplateId: null,
+          title: { in: LEGACY_FAKE_TASK_TITLES },
+        },
+        select: { id: true },
+      }),
+      db.control.findMany({
+        where: {
+          organizationId,
+          controlTemplateId: null,
+          name: { in: LEGACY_FAKE_CONTROL_NAMES },
+        },
+        select: { id: true },
+      }),
+      db.evidenceSubmission.findMany({
+        where: { organizationId },
+        select: { id: true, data: true },
+      }),
+      db.policy.findMany({
+        where: { organizationId, policyTemplateId: null },
+        select: { id: true, content: true },
+      }),
+      db.vendor.findMany({
+        where: { organizationId },
+        select: { id: true, name: true, description: true, status: true },
+      }),
+      db.risk.findMany({
+        where: { organizationId },
+        select: {
+          id: true,
+          title: true,
+          description: true,
+          treatmentStrategyDescription: true,
+        },
+      }),
+    ]);
+
+    const fakeEvidenceIds = evidenceSubmissions
+      .filter((submission) =>
+        this.jsonIncludes(submission.data, 'compctlGenerated'),
+      )
+      .map((submission) => submission.id);
+    const fakePolicyIds = policies
+      .filter((policy) =>
+        this.jsonIncludes(policy.content, 'This fake Type 1 readiness policy'),
+      )
+      .map((policy) => policy.id);
+    const fakeVendorIds = vendors
+      .filter(
+        (vendor) =>
+          vendor.status === VendorStatus.assessed &&
+          (vendor.description.toLowerCase().includes('compctl') ||
+            vendor.description
+              .toLowerCase()
+              .includes('detected during repository inspection') ||
+            vendor.description.includes(
+              'Cloud infrastructure hosting, networking, monitoring, and storage.',
+            ) ||
+            vendor.description.includes(
+              'Source control, code review, and CI/CD workflow provider.',
+            )),
+      )
+      .map((vendor) => vendor.id);
+    const fakeRiskIds = risks
+      .filter(
+        (risk) =>
+          risk.description.toLowerCase().includes('compctl') ||
+          risk.treatmentStrategyDescription === LEGACY_FAKE_RISK_TREATMENT ||
+          [
+            'Unauthorized cloud access',
+            'Vendor concentration and third-party dependency',
+            'Incomplete security evidence before Type 1 audit',
+          ].includes(risk.title),
+      )
+      .map((risk) => risk.id);
+
+    const summary = {
+      dryRun: input.dryRun,
+      customFrameworksToDelete: legacyFrameworks.length,
+      fakeTasksToArchive: legacyTasks.length,
+      fakeControlsToArchive: legacyControls.length,
+      fakePoliciesToArchive: fakePolicyIds.length,
+      fakeEvidenceToDelete: fakeEvidenceIds.length,
+      fakeVendorsToDemote: fakeVendorIds.length,
+      fakeRisksToMarkPending: fakeRiskIds.length,
+    };
+
+    if (input.dryRun) {
+      return { success: true, data: summary };
+    }
+
+    await db.$transaction(async (tx) => {
+      if (fakeEvidenceIds.length > 0) {
+        await tx.evidenceSubmission.deleteMany({
+          where: { id: { in: fakeEvidenceIds }, organizationId },
+        });
+      }
+      if (legacyTasks.length > 0) {
+        await tx.task.updateMany({
+          where: {
+            id: { in: legacyTasks.map((task) => task.id) },
+            organizationId,
+          },
+          data: {
+            status: TaskStatus.todo,
+            lastCompletedAt: null,
+            reviewDate: null,
+            archivedAt: now,
+          },
+        });
+      }
+      if (legacyControls.length > 0) {
+        await tx.control.updateMany({
+          where: {
+            id: { in: legacyControls.map((control) => control.id) },
+            organizationId,
+          },
+          data: { archivedAt: now },
+        });
+      }
+      if (fakePolicyIds.length > 0) {
+        await tx.policy.updateMany({
+          where: { id: { in: fakePolicyIds }, organizationId },
+          data: {
+            status: PolicyStatus.draft,
+            isArchived: true,
+            archivedAt: now,
+            lastArchivedAt: now,
+            lastPublishedAt: null,
+          },
+        });
+      }
+      if (fakeVendorIds.length > 0) {
+        await tx.vendor.updateMany({
+          where: { id: { in: fakeVendorIds }, organizationId },
+          data: { status: VendorStatus.not_assessed },
+        });
+      }
+      if (fakeRiskIds.length > 0) {
+        await tx.risk.updateMany({
+          where: { id: { in: fakeRiskIds }, organizationId },
+          data: {
+            status: RiskStatus.pending,
+            treatmentStrategyDescription: null,
+          },
+        });
+      }
+      if (legacyFrameworks.length > 0) {
+        await tx.customFramework.deleteMany({
+          where: {
+            id: { in: legacyFrameworks.map((framework) => framework.id) },
+            organizationId,
+          },
+        });
+      }
+    });
+
+    const status = await this.getStatus(organizationId);
+    return { success: true, data: { ...summary, status: status.data } };
   }
 
   async getStatus(organizationId: string) {
@@ -352,7 +417,12 @@ export class ReadinessService {
       db.onboarding.findUnique({ where: { organizationId } }),
       db.task.findMany({
         where: { organizationId, archivedAt: null },
-        select: { id: true, title: true, status: true, controls: { select: { id: true } } },
+        select: {
+          id: true,
+          title: true,
+          status: true,
+          controls: { select: { id: true } },
+        },
       }),
       db.policy.findMany({
         where: { organizationId, archivedAt: null, isArchived: false },
@@ -407,7 +477,10 @@ export class ReadinessService {
     const scoreRows = [
       { done: doneTasks, total: tasks.length },
       { done: publishedPolicies, total: policies.length },
-      { done: approvedEvidence, total: Math.max(5, evidenceSubmissions.length) },
+      {
+        done: approvedEvidence,
+        total: Math.max(5, evidenceSubmissions.length),
+      },
       { done: assessedVendors, total: Math.max(1, vendors.length) },
       { done: awsConnections.length > 0 ? 1 : 0, total: 1 },
     ];
@@ -444,6 +517,7 @@ export class ReadinessService {
           vendors: {
             total: vendors.length,
             assessed: assessedVendors,
+            byStatus: this.countBy(vendors.map((vendor) => vendor.status)),
           },
           risks: {
             total: risks.length,
@@ -469,6 +543,19 @@ export class ReadinessService {
               ),
             }
           : null,
+        truthModel: {
+          fakeReadinessSeederDisabled: true,
+          compctlCompletedTasks: 0,
+          compctlPublishedPolicies: 0,
+          compctlApprovedEvidence: 0,
+          humanReviewRequiredFor: [
+            'policy approval and publishing',
+            'task completion',
+            'evidence upload and review',
+            'vendor assessment',
+            'risk treatment decisions',
+          ],
+        },
         appUrls: {
           overview: `${this.getAppUrl(organization.id)}/overview`,
           frameworks: `${this.getAppUrl(organization.id)}/frameworks`,
@@ -503,7 +590,10 @@ export class ReadinessService {
     }
   }
 
-  private async upsertOrganization(input: RegisterInput) {
+  private async upsertOrganization(
+    input: RegisterInput,
+    frameworks: SelectedFramework[],
+  ) {
     const user = await db.user.upsert({
       where: { email: input.ownerEmail },
       create: {
@@ -533,31 +623,19 @@ export class ReadinessService {
           members: {
             create: {
               userId: user.id,
-              role: 'owner,admin,auditor,employee',
+              role: 'owner',
               department: Departments.it,
               jobTitle: 'Compliance Owner',
-            },
-          },
-          context: {
-            createMany: {
-              data: [
-                {
-                  question: 'Which compliance frameworks do you need?',
-                  answer: input.framework,
-                  tags: ['onboarding', 'compctl'],
-                },
-                {
-                  question: 'What does your company do?',
-                  answer:
-                    'Fake Type 1 readiness profile generated by compctl for agent-led SOC 2 preparation.',
-                  tags: ['onboarding', 'compctl'],
-                },
-              ],
             },
           },
         },
       });
       created = true;
+    } else if (input.website && organization.website !== input.website) {
+      organization = await db.organization.update({
+        where: { id: organization.id },
+        data: { website: input.website },
+      });
     }
 
     const member =
@@ -568,7 +646,7 @@ export class ReadinessService {
         data: {
           organizationId: organization.id,
           userId: user.id,
-          role: 'owner,admin,auditor,employee',
+          role: 'owner',
           department: Departments.it,
           jobTitle: 'Compliance Owner',
         },
@@ -579,276 +657,217 @@ export class ReadinessService {
       create: { organizationId: organization.id, triggerJobCompleted: false },
       update: {},
     });
+    await this.syncSetupContext(organization.id, frameworks);
 
     return { user, organization, member, created };
   }
 
-  private async ensureReadinessStructure(params: {
-    organizationId: string;
-    ownerMemberId: string;
-    targetCompletion: number;
-  }) {
-    const { organizationId, ownerMemberId, targetCompletion } = params;
-
-    const customFramework =
-      (await db.customFramework.findFirst({
-        where: { organizationId, name: READINESS_FRAMEWORK_NAME },
-      })) ??
-      (await db.customFramework.create({
-        data: {
-          organizationId,
-          name: READINESS_FRAMEWORK_NAME,
-          description:
-            'Agent-managed SOC 2 Type 1 readiness framework generated by compctl.',
-          version: 'type-1',
-        },
-      }));
-
-    const frameworkInstance =
-      (await db.frameworkInstance.findFirst({
-        where: { organizationId, customFrameworkId: customFramework.id },
-      })) ??
-      (await db.frameworkInstance.create({
-        data: { organizationId, customFrameworkId: customFramework.id },
-      }));
-
-    const allTasks: Array<{ id: string; title: string }> = [];
-    const allPolicies: Array<{ id: string; name: string }> = [];
-    const allControls: Array<{ id: string; name: string }> = [];
-
-    for (const requirement of READINESS_REQUIREMENTS) {
-      const customRequirement = await db.customRequirement.upsert({
-        where: {
-          customFrameworkId_identifier: {
-            customFrameworkId: customFramework.id,
-            identifier: requirement.identifier,
-          },
-        },
-        create: {
-          organizationId,
-          customFrameworkId: customFramework.id,
-          identifier: requirement.identifier,
-          name: requirement.name,
-          description: requirement.description,
-        },
-        update: {
-          name: requirement.name,
-          description: requirement.description,
-        },
-      });
-
-      const control =
-        (await db.control.findFirst({
-          where: { organizationId, name: requirement.control },
-        })) ??
-        (await db.control.create({
-          data: {
-            organizationId,
-            name: requirement.control,
-            description: requirement.description,
-          },
-        }));
-      allControls.push({ id: control.id, name: control.name });
-
-      await db.requirementMap.upsert({
-        where: {
-          controlId_frameworkInstanceId_customRequirementId: {
-            controlId: control.id,
-            frameworkInstanceId: frameworkInstance.id,
-            customRequirementId: customRequirement.id,
-          },
-        },
-        create: {
-          controlId: control.id,
-          frameworkInstanceId: frameworkInstance.id,
-          customRequirementId: customRequirement.id,
-        },
-        update: { archivedAt: null },
-      });
-
-      await db.controlDocumentType.createMany({
-        data: [
-          {
-            controlId: control.id,
-            formType: requirement.evidenceFormType,
-          },
-        ],
-        skipDuplicates: true,
-      });
-
-      const policy = await this.ensurePolicy({
-        organizationId,
-        ownerMemberId,
-        name: requirement.policy,
-        description: requirement.description,
-      });
-      allPolicies.push({ id: policy.id, name: policy.name });
-
-      await db.control.update({
-        where: { id: control.id },
-        data: { policies: { connect: { id: policy.id } } },
-      });
-
-      for (const title of requirement.tasks) {
-        const task = await this.ensureTask({
-          organizationId,
-          ownerMemberId,
-          title,
-          description: `${requirement.identifier}: ${requirement.description}`,
-        });
-        allTasks.push({ id: task.id, title: task.title });
-
-        await db.control.update({
-          where: { id: control.id },
-          data: { tasks: { connect: { id: task.id } } },
-        });
-      }
+  private async resolveFrameworks(
+    frameworkNames: string,
+  ): Promise<SelectedFramework[]> {
+    const available = await db.frameworkEditorFramework.findMany({
+      where: { visible: true },
+      select: { id: true, name: true, description: true },
+      orderBy: { name: 'asc' },
+    });
+    if (available.length === 0) {
+      throw new BadRequestException(
+        'No visible built-in frameworks are configured',
+      );
     }
 
-    const targetDone = Math.floor(allTasks.length * targetCompletion);
-    await Promise.all(
-      allTasks.map((task, index) =>
-        db.task.update({
-          where: { id: task.id },
-          data: {
-            status: index < targetDone ? TaskStatus.done : TaskStatus.todo,
-            lastCompletedAt: index < targetDone ? new Date() : null,
-            reviewDate:
-              index < targetDone
-                ? new Date(Date.now() + 90 * 24 * 60 * 60 * 1000)
-                : null,
-          },
-        }),
-      ),
+    const requestedNames = frameworkNames
+      .split(',')
+      .map((name) => name.trim())
+      .filter(Boolean);
+    const selected = new Map<string, SelectedFramework>();
+    for (const requestedName of requestedNames) {
+      const match = this.bestFrameworkMatch(requestedName, available);
+      selected.set(match.id, match);
+    }
+
+    return Array.from(selected.values());
+  }
+
+  private bestFrameworkMatch(
+    requestedName: string,
+    available: SelectedFramework[],
+  ): SelectedFramework {
+    const requested = requestedName.toLowerCase();
+    const exact = available.find(
+      (framework) => framework.name.toLowerCase() === requested,
     );
+    if (exact) return exact;
+
+    const soc2Requested = requested.includes('soc') && requested.includes('2');
+    if (soc2Requested) {
+      const soc2 = available.find((framework) => {
+        const name = framework.name.toLowerCase();
+        return name.includes('soc') && name.includes('2');
+      });
+      if (soc2) return soc2;
+    }
+
+    const contained = available.find((framework) => {
+      const name = framework.name.toLowerCase();
+      return name.includes(requested) || requested.includes(name);
+    });
+    if (contained) return contained;
+
+    throw new BadRequestException(
+      `Could not find a visible built-in framework matching "${requestedName}"`,
+    );
+  }
+
+  private async ensureBuiltInFrameworks(
+    organizationId: string,
+    frameworks: SelectedFramework[],
+  ) {
+    const frameworkIds = frameworks.map((framework) => framework.id);
+    const existing = await db.frameworkInstance.findMany({
+      where: { organizationId, frameworkId: { in: frameworkIds } },
+      select: { frameworkId: true },
+    });
+    const existingIds = new Set(
+      existing.map((framework) => framework.frameworkId),
+    );
+    const missingIds = frameworkIds.filter((id) => !existingIds.has(id));
+
+    if (missingIds.length > 0) {
+      await this.frameworksService.addFrameworks(organizationId, missingIds);
+    }
+
+    const [frameworkInstances, controls, policies, tasks] = await Promise.all([
+      db.frameworkInstance.findMany({
+        where: { organizationId, frameworkId: { in: frameworkIds } },
+        include: { framework: { select: { id: true, name: true } } },
+      }),
+      db.control.count({
+        where: {
+          organizationId,
+          controlTemplateId: { not: null },
+          archivedAt: null,
+        },
+      }),
+      db.policy.count({
+        where: {
+          organizationId,
+          policyTemplateId: { not: null },
+          archivedAt: null,
+          isArchived: false,
+        },
+      }),
+      db.task.count({
+        where: {
+          organizationId,
+          taskTemplateId: { not: null },
+          archivedAt: null,
+        },
+      }),
+    ]);
 
     return {
-      frameworkInstanceId: frameworkInstance.id,
-      customFrameworkId: customFramework.id,
-      controls: allControls.length,
-      policies: allPolicies.length,
-      tasks: allTasks.length,
-      targetDone,
+      source: 'built-in framework templates',
+      requested: frameworks.map((framework) => ({
+        id: framework.id,
+        name: framework.name,
+      })),
+      added: missingIds.length,
+      existing: existingIds.size,
+      instances: frameworkInstances.map((instance) => ({
+        id: instance.id,
+        frameworkId: instance.frameworkId,
+        name: instance.framework?.name,
+      })),
+      counts: { controls, policies, tasks },
     };
   }
 
-  private async ensurePolicy(params: {
-    organizationId: string;
-    ownerMemberId: string;
-    name: string;
-    description: string;
-  }) {
-    const content = this.policyContent(params.name, params.description);
-    const existing = await db.policy.findFirst({
-      where: { organizationId: params.organizationId, name: params.name },
+  private async syncSetupContext(
+    organizationId: string,
+    frameworks: SelectedFramework[],
+  ) {
+    await this.upsertContextEntry(organizationId, {
+      question: 'Which compliance frameworks do you need?',
+      answer: frameworks.map((framework) => framework.name).join(', '),
+      tags: ['onboarding', 'compctl'],
     });
-
-    if (existing) {
-      const policy = await db.policy.update({
-        where: { id: existing.id },
-        data: {
-          description: params.description,
-          status: PolicyStatus.published,
-          assigneeId: params.ownerMemberId,
-          department: Departments.it,
-          frequency: 'yearly',
-          content: { set: content },
-          draftContent: { set: [] },
-          lastPublishedAt: new Date(),
-        },
-      });
-      if (policy.currentVersionId) {
-        await db.policyVersion.update({
-          where: { id: policy.currentVersionId },
-          data: {
-            content: { set: content },
-            changelog: 'Updated by compctl SOC 2 readiness apply',
-            publishedById: params.ownerMemberId,
-          },
-        });
-      } else {
-        const version = await db.policyVersion.create({
-          data: {
-            policyId: policy.id,
-            version: 1,
-            content: { set: content },
-            changelog: 'Published by compctl SOC 2 readiness apply',
-            publishedById: params.ownerMemberId,
-          },
-        });
-        await db.policy.update({
-          where: { id: policy.id },
-          data: { currentVersionId: version.id },
-        });
-      }
-      return policy;
-    }
-
-    const policy = await db.policy.create({
-      data: {
-        organizationId: params.organizationId,
-        name: params.name,
-        description: params.description,
-        status: PolicyStatus.published,
-        assigneeId: params.ownerMemberId,
-        department: Departments.it,
-        frequency: 'yearly',
-        content: { set: content },
-        draftContent: { set: [] },
-        lastPublishedAt: new Date(),
-      },
-    });
-    const version = await db.policyVersion.create({
-      data: {
-        policyId: policy.id,
-        version: 1,
-        content: { set: content },
-        changelog: 'Published by compctl SOC 2 readiness apply',
-        publishedById: params.ownerMemberId,
-      },
-    });
-    return db.policy.update({
-      where: { id: policy.id },
-      data: { currentVersionId: version.id },
+    await this.upsertContextEntry(organizationId, {
+      question: 'frameworkIds',
+      answer: JSON.stringify(frameworks.map((framework) => framework.id)),
+      tags: ['onboarding', 'compctl'],
     });
   }
 
-  private async ensureTask(params: {
-    organizationId: string;
-    ownerMemberId: string;
-    title: string;
-    description: string;
-  }) {
-    const existing = await db.task.findFirst({
-      where: { organizationId: params.organizationId, title: params.title },
-    });
-    if (existing) {
-      return db.task.update({
-        where: { id: existing.id },
-        data: {
-          description: params.description,
-          assigneeId: params.ownerMemberId,
-          frequency: TaskFrequency.quarterly,
-          department: Departments.it,
-          automationStatus: TaskAutomationStatus.MANUAL,
-        },
+  private async upsertContext(organizationId: string, input: ApplyInput) {
+    const entries = [
+      {
+        question: 'Compctl repository inspection context',
+        answer: JSON.stringify(
+          {
+            ...(input.repoContext ?? {}),
+            compctlReadOnly: true,
+            verificationStatus: 'unverified_human_review_required',
+          },
+          null,
+          2,
+        ),
+        tags: ['compctl', 'repository', 'onboarding', 'unverified'],
+      },
+      {
+        question: 'Compctl readiness workflow mode',
+        answer:
+          'CLI captured context and used built-in Comp AI framework templates. It did not complete tasks, publish policies, approve evidence, assess vendors, or close risks.',
+        tags: ['compctl', 'onboarding', 'truthful-readiness'],
+      },
+    ];
+
+    if (input.vendors.length > 0) {
+      entries.push({
+        question: 'What software do you use?',
+        answer: input.vendors.map((vendor) => vendor.name).join(', '),
+        tags: ['onboarding', 'compctl', 'unverified'],
+      });
+      entries.push({
+        question: 'What are your custom vendors and their websites?',
+        answer: JSON.stringify(
+          input.vendors.map((vendor) => ({
+            name: vendor.name,
+            website: vendor.website,
+          })),
+        ),
+        tags: ['onboarding', 'compctl', 'unverified'],
       });
     }
 
-    return db.task.create({
-      data: {
-        organizationId: params.organizationId,
-        title: params.title,
-        description: params.description,
-        assigneeId: params.ownerMemberId,
-        frequency: TaskFrequency.quarterly,
-        department: Departments.it,
-        automationStatus: TaskAutomationStatus.MANUAL,
-      },
-    });
+    let upserted = 0;
+    for (const entry of entries) {
+      await this.upsertContextEntry(organizationId, entry);
+      upserted += 1;
+    }
+    return { upserted };
   }
 
-  private async upsertVendors(organizationId: string, vendors: VendorInput[]) {
+  private async upsertContextEntry(
+    organizationId: string,
+    entry: { question: string; answer: string; tags: string[] },
+  ) {
+    const existing = await db.context.findFirst({
+      where: { organizationId, question: entry.question },
+    });
+    if (existing) {
+      return db.context.update({
+        where: { id: existing.id },
+        data: { answer: entry.answer, tags: entry.tags },
+      });
+    }
+    return db.context.create({ data: { organizationId, ...entry } });
+  }
+
+  private async upsertCandidateVendors(
+    organizationId: string,
+    vendors: VendorInput[],
+  ) {
     const deduped = new Map<string, VendorInput>();
     for (const vendor of vendors) {
       deduped.set(vendor.name.toLowerCase(), vendor);
@@ -857,31 +876,47 @@ export class ReadinessService {
     const results: Array<{ id: string; name: string }> = [];
     for (const vendor of deduped.values()) {
       const existing = await db.vendor.findFirst({
-        where: { organizationId, name: { equals: vendor.name, mode: 'insensitive' } },
+        where: {
+          organizationId,
+          name: { equals: vendor.name, mode: 'insensitive' },
+        },
       });
       const data = {
         name: vendor.name,
         website: vendor.website,
         description:
           vendor.description ??
-          `${vendor.name} identified by compctl during SOC 2 readiness inspection.`,
+          `${vendor.name} was identified from read-only compctl context and requires human vendor review.`,
         category: this.toVendorCategory(vendor.category),
-        status: VendorStatus.assessed,
-        inherentProbability: Likelihood.possible,
-        inherentImpact: Impact.moderate,
-        residualProbability: Likelihood.unlikely,
-        residualImpact: Impact.minor,
         isSubProcessor: vendor.isSubProcessor ?? true,
       };
       const saved = existing
-        ? await db.vendor.update({ where: { id: existing.id }, data })
-        : await db.vendor.create({ data: { ...data, organizationId } });
+        ? await db.vendor.update({
+            where: { id: existing.id },
+            data: {
+              ...data,
+              status:
+                existing.status === VendorStatus.assessed
+                  ? existing.status
+                  : VendorStatus.not_assessed,
+            },
+          })
+        : await db.vendor.create({
+            data: {
+              ...data,
+              organizationId,
+              status: VendorStatus.not_assessed,
+            },
+          });
       results.push({ id: saved.id, name: saved.name });
     }
     return results;
   }
 
-  private async upsertRisks(organizationId: string, risks: RiskInput[]) {
+  private async upsertCandidateRisks(
+    organizationId: string,
+    risks: RiskInput[],
+  ) {
     const deduped = new Map<string, RiskInput>();
     for (const risk of risks) {
       deduped.set(risk.title.toLowerCase(), risk);
@@ -890,207 +925,100 @@ export class ReadinessService {
     const results: Array<{ id: string; title: string }> = [];
     for (const risk of deduped.values()) {
       const existing = await db.risk.findFirst({
-        where: { organizationId, title: { equals: risk.title, mode: 'insensitive' } },
+        where: {
+          organizationId,
+          title: { equals: risk.title, mode: 'insensitive' },
+        },
       });
       const data = {
         title: risk.title,
         description:
           risk.description ??
-          `${risk.title} identified by compctl during SOC 2 readiness inspection.`,
+          `${risk.title} was identified from read-only compctl context and requires human risk review.`,
         category: this.toRiskCategory(risk.category),
         department: Departments.it,
-        status: RiskStatus.open,
-        likelihood: Likelihood.possible,
-        impact: Impact.moderate,
-        residualLikelihood: Likelihood.unlikely,
-        residualImpact: Impact.minor,
-        treatmentStrategy: RiskTreatmentType.mitigate,
-        treatmentStrategyDescription:
-          'Track owner, evidence, monitoring, and quarterly review cadence before Type 1 audit.',
       };
       const saved = existing
-        ? await db.risk.update({ where: { id: existing.id }, data })
-        : await db.risk.create({ data: { ...data, organizationId } });
+        ? await db.risk.update({
+            where: { id: existing.id },
+            data: {
+              ...data,
+              status:
+                existing.status === RiskStatus.closed
+                  ? existing.status
+                  : RiskStatus.pending,
+            },
+          })
+        : await db.risk.create({
+            data: {
+              ...data,
+              organizationId,
+              status: RiskStatus.pending,
+            },
+          });
       results.push({ id: saved.id, title: saved.title });
     }
     return results;
   }
 
-  private async ensureEvidenceSubmissions(
-    organizationId: string,
-    submittedById: string,
-  ) {
-    const today = new Date().toISOString().slice(0, 10);
-    const submissions: Array<{
-      formType: EvidenceFormType;
-      data: Prisma.InputJsonValue;
-    }> = [
-      {
-        formType: EvidenceFormType.board_meeting,
-        data: {
-          compctlGenerated: true,
-          submissionDate: today,
-          attendees: 'CEO, CTO, Compliance Owner',
-          date: today,
-          meetingMinutes:
-            'Reviewed SOC 2 Type 1 readiness scope, accountable owners, open risks, and evidence plan.',
-          meetingMinutesApprovedBy: 'CEO',
-          approvedDate: today,
-        },
-      },
-      {
-        formType: EvidenceFormType.rbac_matrix,
-        data: {
-          compctlGenerated: true,
-          submissionDate: today,
-          matrixRows: [
-            {
-              system: 'AWS',
-              roleName: 'CompAI-Auditor',
-              permissionsScope: 'SecurityAudit and ViewOnlyAccess',
-              approvedBy: 'Compliance Owner',
-              lastReviewed: today,
-            },
-            {
-              system: 'GitHub',
-              roleName: 'Repository Admin',
-              permissionsScope: 'Branch protection and code review settings',
-              approvedBy: 'CTO',
-              lastReviewed: today,
-            },
-          ],
-        },
-      },
-      {
-        formType: EvidenceFormType.infrastructure_inventory,
-        data: {
-          compctlGenerated: true,
-          submissionDate: today,
-          inventoryRows: [
-            {
-              assetId: 'aws-production',
-              systemType: 'AWS account and ECS/RDS infrastructure',
-              environment: 'production',
-              location: 'eu-central-1',
-              assignedOwner: 'CTO',
-              lastReviewed: today,
-            },
-          ],
-        },
-      },
-      {
-        formType: EvidenceFormType.network_diagram,
-        data: {
-          compctlGenerated: true,
-          submissionDate: today,
-          diagramUrl: 'https://example.com/fake-soc2-network-diagram',
-        },
-      },
-      {
-        formType: EvidenceFormType.tabletop_exercise,
-        data: {
-          compctlGenerated: true,
-          submissionDate: today,
-          exerciseDate: today,
-          facilitator: 'Compliance Owner',
-          scenarioType: 'data-breach',
-          scenarioDescription:
-            'Simulated unauthorized cloud access and customer data exposure response.',
-          attendees: [
-            {
-              name: 'Compliance Owner',
-              roleTitle: 'Facilitator',
-              department: 'Security',
-            },
-          ],
-          sessionNotes:
-            'Validated escalation, customer notification draft, evidence preservation, and remediation tracking.',
-          actionItems: [
-            {
-              finding: 'Need quarterly access review evidence',
-              improvementAction: 'Schedule and attach access review export',
-              assignedOwner: 'CTO',
-              dueDate: today,
-            },
-          ],
-        },
-      },
-    ];
+  private async completeCliOnboarding(organizationId: string) {
+    const [policies, tasks, vendors, risks, awsConnections] = await Promise.all(
+      [
+        db.policy.count({
+          where: {
+            organizationId,
+            archivedAt: null,
+            isArchived: false,
+            policyTemplateId: { not: null },
+          },
+        }),
+        db.task.count({
+          where: {
+            organizationId,
+            archivedAt: null,
+            taskTemplateId: { not: null },
+          },
+        }),
+        db.vendor.count({ where: { organizationId } }),
+        db.risk.count({ where: { organizationId } }),
+        db.integrationConnection.count({
+          where: {
+            organizationId,
+            status: { not: 'disconnected' },
+            provider: { slug: 'aws' },
+          },
+        }),
+      ],
+    );
 
-    let created = 0;
-    for (const submission of submissions) {
-      const existing = await db.evidenceSubmission.findFirst({
-        where: { organizationId, formType: submission.formType },
-      });
-      if (existing) continue;
-      await db.evidenceSubmission.create({
-        data: {
-          organizationId,
-          formType: submission.formType,
-          submittedById,
-          data: submission.data,
-          status: 'approved',
-          reviewedById: submittedById,
-          reviewedAt: new Date(),
-        },
-      });
-      created += 1;
-    }
-
-    return { ensured: submissions.length, created };
-  }
-
-  private async upsertContext(organizationId: string, input: ApplyInput) {
-    const entries = [
-      {
-        question: 'Compctl repository inspection context',
-        answer: JSON.stringify(input.repoContext ?? {}, null, 2),
-        tags: ['compctl', 'github', 'repository', 'onboarding'],
-      },
-      {
-        question: 'Compctl readiness target completion',
-        answer: String(input.targetCompletion),
-        tags: ['compctl', 'onboarding'],
-      },
-    ];
-
-    let upserted = 0;
-    for (const entry of entries) {
-      const existing = await db.context.findFirst({
-        where: { organizationId, question: entry.question },
-      });
-      if (existing) {
-        await db.context.update({
-          where: { id: existing.id },
-          data: { answer: entry.answer, tags: entry.tags },
-        });
-      } else {
-        await db.context.create({ data: { organizationId, ...entry } });
-      }
-      upserted += 1;
-    }
-    return { upserted };
-  }
-
-  private async getOwnerMember(organizationId: string) {
-    const owner = await db.member.findFirst({
-      where: {
+    await db.organization.update({
+      where: { id: organizationId },
+      data: { onboardingCompleted: true, hasAccess: true },
+    });
+    await db.onboarding.upsert({
+      where: { organizationId },
+      create: {
         organizationId,
-        deactivated: false,
-        role: { contains: 'owner' },
+        policies: policies > 0,
+        employees: false,
+        vendors: vendors > 0,
+        integrations: awsConnections > 0,
+        risk: risks > 0,
+        team: true,
+        tasks: tasks > 0,
+        triggerJobCompleted: true,
       },
-      orderBy: { createdAt: 'asc' },
+      update: {
+        policies: policies > 0,
+        vendors: vendors > 0,
+        integrations: awsConnections > 0,
+        risk: risks > 0,
+        team: true,
+        tasks: tasks > 0,
+        triggerJobCompleted: true,
+        triggerJobId: null,
+      },
     });
-    if (owner) return owner;
-
-    const member = await db.member.findFirst({
-      where: { organizationId, deactivated: false },
-      orderBy: { createdAt: 'asc' },
-    });
-    if (!member) {
-      throw new BadRequestException('Organization has no member to own readiness work');
-    }
-    return member;
   }
 
   private async getFrameworkScores(organizationId: string) {
@@ -1116,11 +1044,15 @@ export class ReadinessService {
     return frameworkInstances.map((frameworkInstance) => {
       const controls = frameworkInstance.requirementsMapped
         .map((map) => map.control)
-        .filter((control, index, list) => list.findIndex((c) => c.id === control.id) === index);
+        .filter(
+          (control, index, list) =>
+            list.findIndex((c) => c.id === control.id) === index,
+        );
       const policyMap = new Map<string, PolicyStatus>();
       const taskMap = new Map<string, TaskStatus>();
       for (const control of controls) {
-        for (const policy of control.policies) policyMap.set(policy.id, policy.status);
+        for (const policy of control.policies)
+          policyMap.set(policy.id, policy.status);
         for (const task of control.tasks) taskMap.set(task.id, task.status);
       }
       const totalPolicies = policyMap.size;
@@ -1133,7 +1065,9 @@ export class ReadinessService {
           status === TaskStatus.done || status === TaskStatus.not_relevant,
       ).length;
       const policyScore =
-        totalPolicies > 0 ? Math.round((publishedPolicies / totalPolicies) * 100) : 100;
+        totalPolicies > 0
+          ? Math.round((publishedPolicies / totalPolicies) * 100)
+          : 100;
       const taskScore =
         totalTasks > 0 ? Math.round((doneTasks / totalTasks) * 100) : 100;
       return {
@@ -1142,6 +1076,7 @@ export class ReadinessService {
           frameworkInstance.framework?.name ??
           frameworkInstance.customFramework?.name ??
           'Framework',
+        isCustom: frameworkInstance.customFrameworkId !== null,
         controls: controls.length,
         policies: { total: totalPolicies, published: publishedPolicies },
         tasks: { total: totalTasks, done: doneTasks },
@@ -1150,36 +1085,12 @@ export class ReadinessService {
     });
   }
 
-  private policyContent(
-    name: string,
-    description: string,
-  ): Prisma.InputJsonValue[] {
-    return [
-      {
-        type: 'heading',
-        attrs: { level: 1 },
-        content: [{ type: 'text', text: name }],
-      },
-      {
-        type: 'paragraph',
-        content: [{ type: 'text', text: description }],
-      },
-      {
-        type: 'paragraph',
-        content: [
-          {
-            type: 'text',
-            text:
-              'This fake Type 1 readiness policy was generated by compctl for audit preparation. Management will review it annually and update it when systems, vendors, or risks materially change.',
-          },
-        ],
-      },
-    ];
-  }
-
   private toVendorCategory(category: string | undefined): VendorCategory {
     if (!category) return VendorCategory.other;
-    const normalized = category.replace(/-/g, '_') as keyof typeof VendorCategory;
+    const normalized = category.replace(
+      /-/g,
+      '_',
+    ) as keyof typeof VendorCategory;
     return VendorCategory[normalized] ?? VendorCategory.other;
   }
 
@@ -1187,6 +1098,10 @@ export class ReadinessService {
     if (!category) return RiskCategory.technology;
     const normalized = category.replace(/-/g, '_') as keyof typeof RiskCategory;
     return RiskCategory[normalized] ?? RiskCategory.technology;
+  }
+
+  private jsonIncludes(value: unknown, needle: string) {
+    return JSON.stringify(value ?? '').includes(needle);
   }
 
   private countBy(values: Array<string | null>): Record<string, number> {

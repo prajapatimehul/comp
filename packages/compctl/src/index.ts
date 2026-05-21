@@ -4,7 +4,6 @@ import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { z } from 'zod';
 
 const execFileAsync = promisify(execFile);
 
@@ -60,6 +59,7 @@ program
   .option('--owner-name <name>', 'Owner display name', 'Comp AI Agent')
   .option('--website <url>', 'Company website')
   .option('--framework <name>', 'Readiness framework name', 'SOC 2 Type 1')
+  .option('--api-key-out <path>', 'Write the minted API key to a local file instead of printing it')
   .option(
     '--bootstrap-token <token>',
     'Comp bootstrap token',
@@ -75,7 +75,7 @@ program
         );
       }
       progress('Registering Comp AI client organization');
-      return apiRequest('/v1/readiness/register', {
+      const response = await apiRequest('/v1/readiness/register', {
         method: 'POST',
         apiUrl: globals.apiUrl,
         bootstrapToken: options.bootstrapToken,
@@ -87,6 +87,8 @@ program
           framework: options.framework,
         },
       });
+      await writeApiKeyIfRequested(response, options.apiKeyOut);
+      return response;
     }),
   );
 
@@ -109,9 +111,7 @@ repo
     }),
   );
 
-const readiness = program
-  .command('readiness')
-  .description('SOC 2 readiness commands');
+const readiness = program.command('readiness').description('SOC 2 readiness commands');
 
 readiness
   .command('status')
@@ -129,34 +129,47 @@ readiness
 
 readiness
   .command('apply')
-  .description('Apply repo/vendor/risk context and mark readiness progress in Comp AI')
+  .description('Apply repo/vendor/risk context through the normal Comp AI API flow')
   .option('--repo <path>', 'Repository root or parent folder to inspect')
   .option('--repo-context-file <path>', 'Precomputed repo context JSON')
-  .option('--target-completion <ratio>', 'Target task completion ratio', '0.9')
+  .option('--framework <name>', 'Built-in framework name to ensure', 'SOC 2 Type 1')
+  .option(
+    '--no-complete-onboarding',
+    'Leave the organization in onboarding instead of opening the app',
+  )
   .action((options, command) =>
     run(async () => {
       const globals = command.optsWithGlobals() as GlobalOptions;
-      const targetCompletion = Number(options.targetCompletion);
-      if (!Number.isFinite(targetCompletion) || targetCompletion < 0 || targetCompletion > 1) {
-        throw new CliError('--target-completion must be a number between 0 and 1', 'INVALID_TARGET_COMPLETION');
-      }
-
       const repoContext = await loadRepoContext(options.repo, options.repoContextFile);
       const vendors = Array.isArray(repoContext?.vendors) ? repoContext.vendors : [];
       const risks = Array.isArray(repoContext?.risks) ? repoContext.risks : [];
 
-      progress('Applying readiness context to Comp AI');
-      return apiRequest('/v1/readiness/apply', {
+      progress('Applying readiness context through standard Comp AI APIs');
+      return applyReadinessFlow({
+        apiUrl: globals.apiUrl,
+        apiKey: requireApiKey(globals),
+        framework: options.framework,
+        repoContext,
+        vendors: vendors as JsonObject[],
+        risks: risks as JsonObject[],
+        completeOnboarding: options.completeOnboarding !== false,
+      });
+    }),
+  );
+
+readiness
+  .command('quarantine-generated')
+  .description('Quarantine legacy compctl-generated fake readiness data')
+  .option('--dry-run', 'Show what would be quarantined without changing data')
+  .action((options, command) =>
+    run(async () => {
+      const globals = command.optsWithGlobals() as GlobalOptions;
+      progress('Quarantining legacy compctl-generated fake readiness data');
+      return apiRequest('/v1/readiness/quarantine-generated', {
         method: 'POST',
         apiUrl: globals.apiUrl,
         apiKey: requireApiKey(globals),
-        body: {
-          targetCompletion,
-          repoContext,
-          vendors,
-          risks,
-          markOnboardingComplete: true,
-        },
+        body: { dryRun: options.dryRun === true },
       });
     }),
   );
@@ -169,7 +182,11 @@ aws
   .requiredOption('--external-id <id>', 'External ID, usually the Comp organization ID')
   .requiredOption('--principal-arn <arn>', 'Comp role assumer principal ARN')
   .option('--profile <profile>', 'AWS CLI profile', process.env.AWS_PROFILE)
-  .option('--region <region>', 'AWS region for AWS CLI calls', process.env.AWS_REGION ?? 'us-east-1')
+  .option(
+    '--region <region>',
+    'AWS region for AWS CLI calls',
+    process.env.AWS_REGION ?? 'us-east-1',
+  )
   .option('--role-name <name>', 'IAM role name', 'CompAI-Auditor')
   .option('--dry-run', 'Return the planned AWS CLI actions without executing')
   .action((options) =>
@@ -202,10 +219,12 @@ aws
         apiKey,
       });
       const organizationId =
-        options.externalId ??
-        (unwrapData(status)?.organization as { id?: string } | undefined)?.id;
+        options.externalId ?? (unwrapData(status)?.organization as { id?: string } | undefined)?.id;
       if (!organizationId) {
-        throw new CliError('Could not infer organization ID. Pass --external-id.', 'MISSING_EXTERNAL_ID');
+        throw new CliError(
+          'Could not infer organization ID. Pass --external-id.',
+          'MISSING_EXTERNAL_ID',
+        );
       }
 
       const regions = parseCsv(options.regions);
@@ -263,7 +282,10 @@ async function run(fn: () => Promise<unknown>) {
 }
 
 async function apiRequest(path: string, options: ApiRequestOptions = {}) {
-  const apiUrl = (options.apiUrl ?? process.env.COMP_API_URL ?? 'http://localhost:3333').replace(/\/$/, '');
+  const apiUrl = (options.apiUrl ?? process.env.COMP_API_URL ?? 'http://localhost:3333').replace(
+    /\/$/,
+    '',
+  );
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
@@ -421,7 +443,10 @@ async function findFiles(root: string, suffix: string, maxDepth: number): Promis
 async function walk(
   root: string,
   maxDepth: number,
-  visit: (file: string, entry: { name: string; isDirectory(): boolean; isFile(): boolean }) => Promise<void> | void,
+  visit: (
+    file: string,
+    entry: { name: string; isDirectory(): boolean; isFile(): boolean },
+  ) => Promise<void> | void,
   depth = 0,
 ) {
   if (depth > maxDepth || isSensitive(root)) return;
@@ -454,14 +479,29 @@ async function readSmallFiles(files: string[], maxBytes: number): Promise<string
 function detectVendors(text: string): Array<JsonObject> {
   const candidates = [
     ['Amazon Web Services', 'https://aws.amazon.com', 'cloud', ['aws', 'amazonaws', '@aws-sdk']],
-    ['GitHub', 'https://github.com', 'software_as_a_service', ['github', 'actions/checkout', 'github_token']],
+    [
+      'GitHub',
+      'https://github.com',
+      'software_as_a_service',
+      ['github', 'actions/checkout', 'github_token'],
+    ],
     ['SumSub', 'https://sumsub.com', 'software_as_a_service', ['sumsub']],
     ['Fireblocks', 'https://www.fireblocks.com', 'software_as_a_service', ['fireblocks']],
     ['Fiat Republic', 'https://fiatrepublic.com', 'finance', ['fiat republic', 'fiatrepublic']],
     ['Kraken', 'https://www.kraken.com', 'finance', ['kraken']],
-    ['Google', 'https://cloud.google.com', 'software_as_a_service', ['google oauth', 'google-auth', 'googleapis']],
+    [
+      'Google',
+      'https://cloud.google.com',
+      'software_as_a_service',
+      ['google oauth', 'google-auth', 'googleapis'],
+    ],
     ['TradingView', 'https://www.tradingview.com', 'software_as_a_service', ['tradingview']],
-    ['PostgreSQL', 'https://www.postgresql.org', 'infrastructure', ['postgres', 'postgresql', 'rds']],
+    [
+      'PostgreSQL',
+      'https://www.postgresql.org',
+      'infrastructure',
+      ['postgres', 'postgresql', 'rds'],
+    ],
     ['SMTP Email Provider', undefined, 'software_as_a_service', ['smtp', 'nodemailer', 'resend']],
   ] as const;
 
@@ -531,6 +571,451 @@ function detectRisks(vendors: Array<JsonObject>, services: string[]): Array<Json
   return risks;
 }
 
+async function applyReadinessFlow(params: {
+  apiUrl?: string;
+  apiKey: string;
+  framework: string;
+  repoContext: JsonObject;
+  vendors: JsonObject[];
+  risks: JsonObject[];
+  completeOnboarding: boolean;
+}) {
+  const frameworkImport = await ensureBuiltInFrameworkViaApi(params);
+  const context = await upsertReadinessContextViaApi(params);
+  const vendors = await upsertCandidateVendorsViaApi(params);
+  const risks = await upsertCandidateRisksViaApi(params);
+
+  let organization: unknown = null;
+  if (params.completeOnboarding) {
+    organization = await apiRequest('/v1/organization', {
+      method: 'PATCH',
+      apiUrl: params.apiUrl,
+      apiKey: params.apiKey,
+      body: { onboardingCompleted: true, hasAccess: true },
+    });
+  }
+
+  const status = await apiRequest('/v1/readiness/status', {
+    apiUrl: params.apiUrl,
+    apiKey: params.apiKey,
+  });
+
+  return {
+    mode: 'standard-api-flow-no-fake-completion',
+    frameworkImport,
+    context,
+    vendors,
+    risks,
+    organization,
+    evidence: {
+      created: 0,
+      approved: 0,
+      note: 'No evidence was created or approved by compctl.',
+    },
+    tasks: {
+      completedByCompctl: 0,
+      note: 'Built-in template tasks remain todo until completed through the normal task workflow.',
+    },
+    policies: {
+      publishedByCompctl: 0,
+      note: 'Built-in template policies remain draft until a user publishes them.',
+    },
+    status,
+  };
+}
+
+async function ensureBuiltInFrameworkViaApi(params: {
+  apiUrl?: string;
+  apiKey: string;
+  framework: string;
+}) {
+  const existing = await apiRequest('/v1/frameworks', {
+    apiUrl: params.apiUrl,
+    apiKey: params.apiKey,
+  });
+  const existingFrameworks = responseArray(existing);
+  const existingMatch = existingFrameworks.find((item) => {
+    const framework = item as {
+      framework?: { name?: string };
+      customFramework?: { name?: string };
+    };
+    return (
+      framework.framework?.name && frameworkNameMatches(params.framework, framework.framework.name)
+    );
+  });
+  if (existingMatch) {
+    return { alreadyPresent: true, selected: summarizeFrameworkInstance(existingMatch) };
+  }
+
+  const available = await apiRequest('/v1/frameworks/available', {
+    apiUrl: params.apiUrl,
+    apiKey: params.apiKey,
+  });
+  const selected = selectFramework(params.framework, responseArray(available));
+  const added = await apiRequest('/v1/frameworks', {
+    method: 'POST',
+    apiUrl: params.apiUrl,
+    apiKey: params.apiKey,
+    body: { frameworkIds: [selected.id] },
+  });
+
+  return {
+    alreadyPresent: false,
+    selected,
+    added,
+  };
+}
+
+async function upsertReadinessContextViaApi(params: {
+  apiUrl?: string;
+  apiKey: string;
+  repoContext: JsonObject;
+  vendors: JsonObject[];
+}) {
+  const entries = [
+    {
+      question: 'Compctl repository inspection context',
+      answer: compactContextAnswer(params.repoContext),
+      tags: ['compctl', 'repository', 'onboarding', 'unverified'],
+    },
+    {
+      question: 'Compctl readiness workflow mode',
+      answer:
+        'CLI captured context and used built-in Comp AI framework templates through public APIs. It did not complete tasks, publish policies, approve evidence, assess vendors, or close risks.',
+      tags: ['compctl', 'onboarding', 'truthful-readiness'],
+    },
+  ];
+
+  if (params.vendors.length > 0) {
+    entries.push({
+      question: 'What software do you use?',
+      answer: params.vendors
+        .map((vendor) => String(vendor.name ?? ''))
+        .filter(Boolean)
+        .join(', '),
+      tags: ['onboarding', 'compctl', 'unverified'],
+    });
+    entries.push({
+      question: 'What are your custom vendors and their websites?',
+      answer: JSON.stringify(
+        params.vendors.map((vendor) => ({
+          name: vendor.name,
+          website: vendor.website,
+        })),
+      ),
+      tags: ['onboarding', 'compctl', 'unverified'],
+    });
+  }
+
+  const upserted = [];
+  for (const entry of entries) {
+    upserted.push(await upsertContextEntryViaApi(params, entry));
+  }
+  return { upserted: upserted.length };
+}
+
+function compactContextAnswer(repoContext: JsonObject): string {
+  const repositories = Array.isArray(repoContext.repositories)
+    ? repoContext.repositories.map((repo) => {
+        const item = repo as { name?: string; path?: string };
+        return item.name ?? item.path;
+      })
+    : [];
+  const packages = Array.isArray(repoContext.packages)
+    ? repoContext.packages.map((pkg) => {
+        const item = pkg as { name?: string; path?: string };
+        return item.name ?? item.path;
+      })
+    : [];
+  const infrastructure = repoContext.infrastructure as
+    | {
+        services?: unknown[];
+        terraformFiles?: unknown[];
+        githubWorkflowFiles?: unknown[];
+      }
+    | undefined;
+
+  const summary = {
+    inspectedAt: repoContext.inspectedAt,
+    repositories: repositories.filter(Boolean).slice(0, 12),
+    packages: packages.filter(Boolean).slice(0, 20),
+    infrastructure: {
+      services: Array.isArray(infrastructure?.services)
+        ? infrastructure.services.filter(Boolean).slice(0, 20)
+        : [],
+      terraformFileCount: Array.isArray(infrastructure?.terraformFiles)
+        ? infrastructure.terraformFiles.length
+        : 0,
+      githubWorkflowFileCount: Array.isArray(infrastructure?.githubWorkflowFiles)
+        ? infrastructure.githubWorkflowFiles.length
+        : 0,
+    },
+    vendorCandidates: Array.isArray(repoContext.vendors)
+      ? repoContext.vendors
+          .map((vendor) => (vendor as { name?: string }).name)
+          .filter(Boolean)
+          .slice(0, 20)
+      : [],
+    riskCandidates: Array.isArray(repoContext.risks)
+      ? repoContext.risks
+          .map((risk) => (risk as { title?: string }).title)
+          .filter(Boolean)
+          .slice(0, 20)
+      : [],
+    compctlReadOnly: true,
+    verificationStatus: 'unverified_human_review_required',
+  };
+
+  return fitContextAnswer(JSON.stringify(summary));
+}
+
+function fitContextAnswer(answer: string, maxLength = 1800): string {
+  if (answer.length <= maxLength) return answer;
+  return `${answer.slice(0, maxLength - 80)}... truncated; full inspection remains local and unverified.`;
+}
+
+async function upsertContextEntryViaApi(
+  params: { apiUrl?: string; apiKey: string },
+  entry: { question: string; answer: string; tags: string[] },
+) {
+  const existing = await apiRequest('/v1/context', {
+    apiUrl: params.apiUrl,
+    apiKey: params.apiKey,
+  });
+  const match = responseArray(existing).find((item) => {
+    const context = item as { id?: string; question?: string };
+    return context.question === entry.question;
+  }) as { id?: string } | undefined;
+
+  if (match?.id) {
+    return apiRequest(`/v1/context/${match.id}`, {
+      method: 'PATCH',
+      apiUrl: params.apiUrl,
+      apiKey: params.apiKey,
+      body: entry,
+    });
+  }
+
+  return apiRequest('/v1/context', {
+    method: 'POST',
+    apiUrl: params.apiUrl,
+    apiKey: params.apiKey,
+    body: entry,
+  });
+}
+
+async function upsertCandidateVendorsViaApi(params: {
+  apiUrl?: string;
+  apiKey: string;
+  vendors: JsonObject[];
+}) {
+  const existing = await apiRequest('/v1/vendors', {
+    apiUrl: params.apiUrl,
+    apiKey: params.apiKey,
+  });
+  const existingVendors = responseArray(existing);
+  const results = [];
+
+  for (const vendor of dedupeByName(params.vendors, 'name')) {
+    const name = String(vendor.name ?? '').trim();
+    if (!name) continue;
+    const match = existingVendors.find((item) => {
+      const existingVendor = item as { name?: string };
+      return existingVendor.name?.toLowerCase() === name.toLowerCase();
+    }) as { id?: string; status?: string } | undefined;
+    const body = {
+      name,
+      website: typeof vendor.website === 'string' ? vendor.website : undefined,
+      description:
+        typeof vendor.description === 'string' && vendor.description.trim()
+          ? vendor.description
+          : `${name} was identified from read-only compctl context and requires human vendor review.`,
+      category: toVendorCategory(String(vendor.category ?? '')),
+      status: match?.status === 'assessed' ? match.status : 'not_assessed',
+      isSubProcessor: typeof vendor.isSubProcessor === 'boolean' ? vendor.isSubProcessor : true,
+    };
+
+    if (match?.id) {
+      results.push({
+        reused: true,
+        vendor: await apiRequest(`/v1/vendors/${match.id}`, {
+          method: 'PATCH',
+          apiUrl: params.apiUrl,
+          apiKey: params.apiKey,
+          body,
+        }),
+      });
+    } else {
+      results.push({
+        reused: false,
+        vendor: await apiRequest('/v1/vendors', {
+          method: 'POST',
+          apiUrl: params.apiUrl,
+          apiKey: params.apiKey,
+          body,
+        }),
+      });
+    }
+  }
+
+  return { upserted: results.length, results };
+}
+
+async function upsertCandidateRisksViaApi(params: {
+  apiUrl?: string;
+  apiKey: string;
+  risks: JsonObject[];
+}) {
+  const existing = await apiRequest('/v1/risks?perPage=200', {
+    apiUrl: params.apiUrl,
+    apiKey: params.apiKey,
+  });
+  const existingRisks = responseArray(existing);
+  const results = [];
+
+  for (const risk of dedupeByName(params.risks, 'title')) {
+    const title = String(risk.title ?? '').trim();
+    if (!title) continue;
+    const match = existingRisks.find((item) => {
+      const existingRisk = item as { title?: string };
+      return existingRisk.title?.toLowerCase() === title.toLowerCase();
+    }) as { id?: string; status?: string } | undefined;
+    const body = {
+      title,
+      description:
+        typeof risk.description === 'string' && risk.description.trim()
+          ? risk.description
+          : `${title} was identified from read-only compctl context and requires human risk review.`,
+      category: toRiskCategory(String(risk.category ?? '')),
+      department: 'it',
+      status: match?.status === 'closed' ? match.status : 'pending',
+    };
+
+    if (match?.id) {
+      results.push({
+        reused: true,
+        risk: await apiRequest(`/v1/risks/${match.id}`, {
+          method: 'PATCH',
+          apiUrl: params.apiUrl,
+          apiKey: params.apiKey,
+          body,
+        }),
+      });
+    } else {
+      results.push({
+        reused: false,
+        risk: await apiRequest('/v1/risks', {
+          method: 'POST',
+          apiUrl: params.apiUrl,
+          apiKey: params.apiKey,
+          body,
+        }),
+      });
+    }
+  }
+
+  return { upserted: results.length, results };
+}
+
+function responseArray(value: unknown): unknown[] {
+  const unwrapped = unwrapData(value);
+  if (Array.isArray(unwrapped)) return unwrapped;
+  if (
+    unwrapped &&
+    typeof unwrapped === 'object' &&
+    Array.isArray((unwrapped as { data?: unknown }).data)
+  ) {
+    return (unwrapped as { data: unknown[] }).data;
+  }
+  if (value && typeof value === 'object' && Array.isArray((value as { data?: unknown }).data)) {
+    return (value as { data: unknown[] }).data;
+  }
+  return [];
+}
+
+function selectFramework(requested: string, frameworks: unknown[]) {
+  const candidates = frameworks
+    .map((framework) => framework as { id?: string; name?: string; isCustom?: boolean })
+    .filter((framework) => framework.id && framework.name && framework.isCustom !== true);
+  const exact = candidates.find(
+    (framework) => framework.name!.toLowerCase() === requested.toLowerCase(),
+  );
+  const soc2 = candidates.find((framework) => frameworkNameMatches(requested, framework.name!));
+  const selected = exact ?? soc2;
+  if (!selected?.id || !selected.name) {
+    throw new CliError(
+      `Could not find a built-in framework matching "${requested}".`,
+      'FRAMEWORK_NOT_FOUND',
+    );
+  }
+  return { id: selected.id, name: selected.name };
+}
+
+function frameworkNameMatches(requested: string, actual: string) {
+  const requestedLower = requested.toLowerCase();
+  const actualLower = actual.toLowerCase();
+  if (actualLower === requestedLower) return true;
+  if (requestedLower.includes('soc') && requestedLower.includes('2')) {
+    return actualLower.includes('soc') && actualLower.includes('2');
+  }
+  return actualLower.includes(requestedLower) || requestedLower.includes(actualLower);
+}
+
+function summarizeFrameworkInstance(value: unknown) {
+  const instance = value as {
+    id?: string;
+    frameworkId?: string;
+    framework?: { name?: string };
+  };
+  return {
+    id: instance.id,
+    frameworkId: instance.frameworkId,
+    name: instance.framework?.name,
+  };
+}
+
+function dedupeByName(items: JsonObject[], key: 'name' | 'title') {
+  const deduped = new Map<string, JsonObject>();
+  for (const item of items) {
+    const value = String(item[key] ?? '').trim();
+    if (value) deduped.set(value.toLowerCase(), item);
+  }
+  return Array.from(deduped.values());
+}
+
+function toVendorCategory(value: string) {
+  const allowed = new Set([
+    'cloud',
+    'infrastructure',
+    'software_as_a_service',
+    'finance',
+    'marketing',
+    'sales',
+    'hr',
+    'other',
+  ]);
+  const normalized = value.trim().replace(/-/g, '_');
+  return allowed.has(normalized) ? normalized : 'other';
+}
+
+function toRiskCategory(value: string) {
+  const allowed = new Set([
+    'customer',
+    'fraud',
+    'governance',
+    'operations',
+    'other',
+    'people',
+    'regulatory',
+    'reporting',
+    'resilience',
+    'technology',
+    'vendor_management',
+  ]);
+  const normalized = value.trim().replace(/-/g, '_');
+  return allowed.has(normalized) ? normalized : 'technology';
+}
+
 interface AwsRoleOptions {
   externalId: string;
   principalArn: string;
@@ -588,7 +1073,10 @@ async function setupAwsRole(options: AwsRoleOptions) {
   const extraFile = await writeTempJson(extraReadPolicy);
 
   try {
-    const existing = await awsJson(['iam', 'get-role', '--role-name', options.roleName], options).catch(() => null);
+    const existing = await awsJson(
+      ['iam', 'get-role', '--role-name', options.roleName],
+      options,
+    ).catch(() => null);
     if (existing) {
       await awsJson(
         [
@@ -706,7 +1194,11 @@ async function connectAws(params: {
       metadata?: { roleArn?: string };
       status?: string;
     };
-    return item.providerSlug === 'aws' && item.metadata?.roleArn === params.roleArn && item.status !== 'disconnected';
+    return (
+      item.providerSlug === 'aws' &&
+      item.metadata?.roleArn === params.roleArn &&
+      item.status !== 'disconnected'
+    );
   });
   if (match) {
     const item = match as { id?: string; status?: string };
@@ -750,10 +1242,17 @@ async function scanAws(params: { apiUrl?: string; apiKey: string; connectionId?:
       apiKey: params.apiKey,
     });
     const awsConnections = Array.isArray(existing)
-      ? existing.filter((connection) => (connection as { providerSlug?: string; status?: string }).providerSlug === 'aws' && (connection as { status?: string }).status === 'active')
+      ? existing.filter(
+          (connection) =>
+            (connection as { providerSlug?: string; status?: string }).providerSlug === 'aws' &&
+            (connection as { status?: string }).status === 'active',
+        )
       : [];
     if (awsConnections.length === 0) {
-      throw new CliError('No active AWS connection found. Run compctl aws connect first.', 'NO_AWS_CONNECTION');
+      throw new CliError(
+        'No active AWS connection found. Run compctl aws connect first.',
+        'NO_AWS_CONNECTION',
+      );
     }
     connectionId = String((awsConnections[0] as { id: string }).id);
   }
@@ -766,7 +1265,9 @@ async function scanAws(params: { apiUrl?: string; apiKey: string; connectionId?:
       apiKey: params.apiKey,
     });
   } catch (error) {
-    progress(`Service detection skipped: ${error instanceof Error ? error.message : String(error)}`);
+    progress(
+      `Service detection skipped: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 
   const scan = await apiRequest(`/v1/cloud-security/scan/${connectionId}`, {
@@ -803,14 +1304,16 @@ async function writeTempJson(value: unknown) {
 }
 
 function outputSuccess(data: unknown) {
-  console.log(JSON.stringify({ success: true, data: unwrapData(data) ?? data }, null, 2));
+  console.log(
+    JSON.stringify(redactSecrets({ success: true, data: unwrapData(data) ?? data }), null, 2),
+  );
 }
 
 function outputError(error: unknown) {
   if (error instanceof ApiError) {
     console.log(
       JSON.stringify(
-        {
+        redactSecrets({
           success: false,
           error: {
             code: 'API_ERROR',
@@ -818,7 +1321,7 @@ function outputError(error: unknown) {
             message: error.message,
             details: error.details,
           },
-        },
+        }),
         null,
         2,
       ),
@@ -829,14 +1332,14 @@ function outputError(error: unknown) {
   if (error instanceof CliError) {
     console.log(
       JSON.stringify(
-        {
+        redactSecrets({
           success: false,
           error: {
             code: error.code,
             message: error.message,
             details: error.details,
           },
-        },
+        }),
         null,
         2,
       ),
@@ -846,13 +1349,13 @@ function outputError(error: unknown) {
 
   console.log(
     JSON.stringify(
-      {
+      redactSecrets({
         success: false,
         error: {
           code: 'UNEXPECTED_ERROR',
           message: error instanceof Error ? error.message : String(error),
         },
-      },
+      }),
       null,
       2,
     ),
@@ -889,6 +1392,39 @@ function relativeTo(root: string, file: string): string {
 
 function sep() {
   return process.platform === 'win32' ? '\\' : '/';
+}
+
+async function writeApiKeyIfRequested(response: unknown, outputPath?: string) {
+  if (!outputPath) return;
+  const data = unwrapData(response);
+  const apiKey =
+    data && typeof data === 'object' && 'apiKey' in data
+      ? (data as { apiKey?: unknown }).apiKey
+      : undefined;
+  if (typeof apiKey !== 'string' || !apiKey) {
+    throw new CliError(
+      'Register response did not include an API key to write.',
+      'MISSING_API_KEY_OUTPUT',
+    );
+  }
+  const resolved = resolve(outputPath);
+  await writeFile(resolved, `${apiKey}\n`, { mode: 0o600 });
+  progress(`Wrote API key to ${resolved}`);
+}
+
+function redactSecrets(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => redactSecrets(item));
+  if (!value || typeof value !== 'object') return value;
+
+  const redacted: Record<string, unknown> = {};
+  for (const [key, nested] of Object.entries(value)) {
+    if (/api[-_]?key|token|secret|password|access[-_]?key|session/i.test(key)) {
+      redacted[key] = '[redacted]';
+    } else {
+      redacted[key] = redactSecrets(nested);
+    }
+  }
+  return redacted;
 }
 
 program.parseAsync().catch((error) => {
