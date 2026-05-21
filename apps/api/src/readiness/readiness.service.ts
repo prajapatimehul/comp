@@ -231,6 +231,7 @@ export class ReadinessService {
       db.task.findMany({
         where: {
           organizationId,
+          archivedAt: null,
           taskTemplateId: null,
           title: { in: LEGACY_FAKE_TASK_TITLES },
         },
@@ -239,6 +240,7 @@ export class ReadinessService {
       db.control.findMany({
         where: {
           organizationId,
+          archivedAt: null,
           controlTemplateId: null,
           name: { in: LEGACY_FAKE_CONTROL_NAMES },
         },
@@ -249,7 +251,12 @@ export class ReadinessService {
         select: { id: true, data: true },
       }),
       db.policy.findMany({
-        where: { organizationId, policyTemplateId: null },
+        where: {
+          organizationId,
+          archivedAt: null,
+          isArchived: false,
+          policyTemplateId: null,
+        },
         select: { id: true, content: true },
       }),
       db.vendor.findMany({
@@ -262,6 +269,7 @@ export class ReadinessService {
           id: true,
           title: true,
           description: true,
+          status: true,
           treatmentStrategyDescription: true,
         },
       }),
@@ -294,16 +302,23 @@ export class ReadinessService {
       )
       .map((vendor) => vendor.id);
     const fakeRiskIds = risks
-      .filter(
-        (risk) =>
+      .filter((risk) => {
+        const isLegacyGeneratedRisk =
           risk.description.toLowerCase().includes('compctl') ||
           risk.treatmentStrategyDescription === LEGACY_FAKE_RISK_TREATMENT ||
           [
             'Unauthorized cloud access',
             'Vendor concentration and third-party dependency',
             'Incomplete security evidence before Type 1 audit',
-          ].includes(risk.title),
-      )
+          ].includes(risk.title);
+
+        return (
+          isLegacyGeneratedRisk &&
+          (risk.status !== RiskStatus.pending ||
+            risk.treatmentStrategyDescription === LEGACY_FAKE_RISK_TREATMENT ||
+            risk.description.toLowerCase().includes('compctl'))
+        );
+      })
       .map((risk) => risk.id);
 
     const summary = {
