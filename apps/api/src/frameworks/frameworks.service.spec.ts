@@ -35,7 +35,6 @@ jest.mock('./frameworks-scores.helper', () => ({
   getOverviewScores: jest.fn(),
   getCurrentMember: jest.fn(),
   computeFrameworkComplianceScore: jest.fn(),
-  computeFrameworkReadinessProgressScore: jest.fn(),
 }));
 
 import { db } from '@db';
@@ -164,7 +163,7 @@ describe('FrameworksService', () => {
   // (which is always org-scoped) and a platform framework instance reads from
   // the global `frameworkEditorRequirement`. There is no shared table to leak.
   describe('custom-framework isolation', () => {
-    it("findOne on a custom FI reads only that org's custom requirements", async () => {
+    it('findOne on a custom FI reads only that org\'s custom requirements', async () => {
       (mockDb.frameworkInstance.findUnique as jest.Mock).mockResolvedValue({
         id: 'fi_custom',
         organizationId: 'org_A',
@@ -187,7 +186,9 @@ describe('FrameworksService', () => {
         where: { customFrameworkId: 'cfrm_A' },
         orderBy: { name: 'asc' },
       });
-      expect(mockDb.frameworkEditorRequirement.findMany).not.toHaveBeenCalled();
+      expect(
+        mockDb.frameworkEditorRequirement.findMany,
+      ).not.toHaveBeenCalled();
       expect(result.requirementDefinitions).toHaveLength(1);
     });
 

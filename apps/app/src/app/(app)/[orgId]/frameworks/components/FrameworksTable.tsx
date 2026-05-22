@@ -1,6 +1,5 @@
 'use client';
 
-import type { FrameworkInstanceWithControls } from '@/lib/types/framework';
 import {
   Badge,
   HStack,
@@ -19,6 +18,7 @@ import { ArrowDown, ArrowUp, ArrowsVertical, Search } from '@trycompai/design-sy
 import Image from 'next/image';
 import { useRouter } from 'next/navigation';
 import { useMemo, useState } from 'react';
+import type { FrameworkInstanceWithControls } from '@/lib/types/framework';
 
 type SortColumn = 'name' | 'compliance' | 'controls';
 type SortDirection = 'asc' | 'desc';
@@ -26,7 +26,6 @@ type SortDirection = 'asc' | 'desc';
 interface FrameworksTableProps {
   frameworks: FrameworkInstanceWithControls[];
   complianceMap: Record<string, number>;
-  progressMap: Record<string, number>;
   organizationId: string;
 }
 
@@ -42,8 +41,8 @@ const FRAMEWORK_BADGES: Record<string, string> = {
   'SOC 2': '/badges/soc2.svg',
   'ISO 27001': '/badges/iso27001.svg',
   'ISO 42001': '/badges/iso42001.svg',
-  HIPAA: '/badges/hipaa.svg',
-  GDPR: '/badges/gdpr.svg',
+  'HIPAA': '/badges/hipaa.svg',
+  'GDPR': '/badges/gdpr.svg',
   'PCI DSS': '/badges/pci-dss.svg',
   'PCI DSS Level 1': '/badges/pci-dss.svg',
   'NEN 7510': '/badges/nen7510.svg',
@@ -63,15 +62,12 @@ function getFrameworkBadge(name: string): string | null {
   return null;
 }
 
-function getFrameworkStatus(
-  complianceScore: number,
-  progressScore: number,
-): {
+function getFrameworkStatus(complianceScore: number): {
   label: string;
   variant: 'default' | 'secondary' | 'destructive';
 } {
   if (complianceScore >= 100) return { label: 'Compliant', variant: 'default' };
-  if (progressScore > 0) return { label: 'In Progress', variant: 'secondary' };
+  if (complianceScore > 0) return { label: 'In Progress', variant: 'secondary' };
   return { label: 'Not Started', variant: 'destructive' };
 }
 
@@ -97,7 +93,6 @@ function SortIcon({
 export function FrameworksTable({
   frameworks,
   complianceMap,
-  progressMap,
   organizationId,
 }: FrameworksTableProps) {
   const router = useRouter();
@@ -132,8 +127,8 @@ export function FrameworksTable({
         case 'name':
           return dir * frameworkName(a).localeCompare(frameworkName(b));
         case 'compliance': {
-          const scoreA = progressMap[a.id] ?? complianceMap[a.id] ?? 0;
-          const scoreB = progressMap[b.id] ?? complianceMap[b.id] ?? 0;
+          const scoreA = complianceMap[a.id] ?? 0;
+          const scoreB = complianceMap[b.id] ?? 0;
           return dir * (scoreA - scoreB);
         }
         case 'controls':
@@ -144,7 +139,7 @@ export function FrameworksTable({
     });
 
     return items;
-  }, [frameworks, searchTerm, sortColumn, sortDirection, complianceMap, progressMap]);
+  }, [frameworks, searchTerm, sortColumn, sortDirection, complianceMap]);
 
   const handleRowClick = (frameworkId: string) => {
     router.push(`/${organizationId}/frameworks/${frameworkId}`);
@@ -192,7 +187,7 @@ export function FrameworksTable({
                   style={{ cursor: 'pointer' }}
                   onClick={() => handleSort('compliance')}
                 >
-                  <span>Progress</span>
+                  <span>Compliance</span>
                   <SortIcon
                     column="compliance"
                     sortColumn={sortColumn}
@@ -221,9 +216,8 @@ export function FrameworksTable({
           <TableBody>
             {filteredAndSorted.map((fw) => {
               const score = complianceMap[fw.id] ?? 0;
-              const progressScore = progressMap[fw.id] ?? score;
-              const roundedScore = Math.round(progressScore);
-              const status = getFrameworkStatus(score, progressScore);
+              const roundedScore = Math.round(score);
+              const status = getFrameworkStatus(score);
               const name = frameworkName(fw);
               const description = frameworkDescription(fw);
               const badgeSrc = getFrameworkBadge(name);
@@ -278,7 +272,7 @@ export function FrameworksTable({
                       </div>
                       <div className="tabular-nums w-10 text-right">
                         <Text size="sm" variant="muted">
-                          {score >= 100 ? `${Math.round(score)}%` : `${roundedScore}%`}
+                          {roundedScore}%
                         </Text>
                       </div>
                     </div>

@@ -1,7 +1,6 @@
 import { headers } from 'next/headers';
 
-const API_BASE_URL =
-  process.env.BACKEND_API_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3333';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3333';
 
 interface ApiResponse<T = unknown> {
   data?: T;
@@ -62,7 +61,9 @@ async function call<T = unknown>(
 
     return {
       data: response.ok ? data : undefined,
-      error: !response.ok ? data?.message || data?.error || `HTTP ${response.status}` : undefined,
+      error: !response.ok
+        ? data?.message || data?.error || `HTTP ${response.status}`
+        : undefined,
       status: response.status,
     };
   } catch (error) {

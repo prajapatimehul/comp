@@ -93,7 +93,6 @@ ENV NEXT_PUBLIC_BETTER_AUTH_URL=$NEXT_PUBLIC_BETTER_AUTH_URL \
     NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL \
     NEXT_TELEMETRY_DISABLED=1 NODE_ENV=production \
     NEXT_OUTPUT_STANDALONE=true \
-    NEXT_IGNORE_TYPE_ERRORS=true \
     NODE_OPTIONS=--max_old_space_size=6144
 
 # Build the app
@@ -141,10 +140,6 @@ RUN cd apps/app && SKIP_ENV_VALIDATION=true bun run build:docker
 FROM node:22-alpine AS app
 
 WORKDIR /app
-
-ENV HOSTNAME=0.0.0.0 PORT=3000
-
-RUN apk add --no-cache curl
 
 # Copy Next standalone output
 COPY --from=app-builder /app/apps/app/.next/standalone ./

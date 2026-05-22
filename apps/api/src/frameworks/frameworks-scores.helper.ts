@@ -10,10 +10,7 @@ import { computePeopleScore } from './frameworks-people-score.helper';
 
 const SIX_MONTHS_MS = 6 * 30 * 24 * 60 * 60 * 1000;
 
-export {
-  computeFrameworkComplianceScore,
-  computeFrameworkReadinessProgressScore,
-} from './frameworks-compliance-score.helper';
+export { computeFrameworkComplianceScore } from './frameworks-compliance-score.helper';
 
 export async function getOverviewScores(organizationId: string) {
   const [allPolicies, allTasks, employees, onboarding, org, hipaaInstance] =

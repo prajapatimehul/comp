@@ -22,7 +22,7 @@ async function call<T = unknown>(
   options: CallOptions = {},
 ): Promise<ApiResponse<T>> {
   const { method = 'GET', body } = options;
-  const baseUrl = process.env.BACKEND_API_URL || env.NEXT_PUBLIC_API_URL || 'http://localhost:3333';
+  const baseUrl = env.NEXT_PUBLIC_API_URL || 'http://localhost:3333';
 
   const requestHeaders: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -69,7 +69,8 @@ async function call<T = unknown>(
 }
 
 export const serverApi = {
-  get: <T = unknown>(endpoint: string) => call<T>(endpoint, { method: 'GET' }),
+  get: <T = unknown>(endpoint: string) =>
+    call<T>(endpoint, { method: 'GET' }),
 
   post: <T = unknown>(endpoint: string, body?: unknown) =>
     call<T>(endpoint, { method: 'POST', body }),
