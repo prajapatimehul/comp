@@ -26,9 +26,14 @@ echo "==> bucket: $BUCKET  region: $REGION  user: $USER_NAME"
 # Build CORS rules JSON from comma-separated origins
 ORIGINS_JSON=$(echo "$ORIGINS_CSV" | jq -Rc 'split(",")')
 
-aws s3api create-bucket --profile "$PROFILE" --region "$REGION" \
-  --bucket "$BUCKET" \
-  --create-bucket-configuration LocationConstraint="$REGION" >/dev/null
+if [ "$REGION" = "us-east-1" ]; then
+  aws s3api create-bucket --profile "$PROFILE" --region "$REGION" \
+    --bucket "$BUCKET" >/dev/null
+else
+  aws s3api create-bucket --profile "$PROFILE" --region "$REGION" \
+    --bucket "$BUCKET" \
+    --create-bucket-configuration LocationConstraint="$REGION" >/dev/null
+fi
 
 aws s3api put-bucket-tagging --profile "$PROFILE" --bucket "$BUCKET" \
   --tagging "TagSet=[{Key=Project,Value=$PROJECT_TAG}]"

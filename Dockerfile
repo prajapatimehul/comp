@@ -39,22 +39,21 @@ FROM oven/bun:1.2.8 AS migrator
 
 WORKDIR /app
 
-# Copy local Prisma schema and migrations from workspace
+# Copy local Prisma schema, migrations, seed code, and generation scripts from workspace
 COPY packages/db/prisma ./packages/db/prisma
+COPY packages/db/prisma.config.ts ./packages/db/prisma.config.ts
+COPY packages/db/scripts ./packages/db/scripts
+COPY packages/db/src ./packages/db/src
 
 # Create minimal package.json for Prisma runtime (also used by seeder)
-RUN echo '{"name":"migrator","type":"module","dependencies":{"prisma":"^6.14.0","@prisma/client":"^6.14.0","@prisma/adapter-pg":"^6.14.0","pg":"^8.13.1","@trycompai/db":"^1.3.4","zod":"^3.25.7"}}' > package.json
+RUN echo '{"name":"migrator","type":"module","dependencies":{"prisma":"7.6.0","@prisma/client":"7.6.0","@prisma/adapter-pg":"7.6.0","pg":"^8.13.1","dotenv":"^16.4.5","zod":"^4.3.6"}}' > package.json
 
-# Install ONLY Prisma dependencies
-RUN bun install
+# Install ONLY Prisma dependencies. Prisma's install-time Node guard is stricter
+# than the runtime path this image uses, so match the workspace deps stage.
+RUN bun install --ignore-scripts
 
-# Ensure Prisma can find migrations relative to the published schema path
-# We copy the local migrations into the published package's dist directory
-RUN cp -R packages/db/prisma/migrations node_modules/@trycompai/db/dist/
-
-# Run migrations against the combined schema published by @trycompai/db
-RUN echo "Running migrations against @trycompai/db combined schema"
-CMD ["bunx", "prisma", "migrate", "deploy", "--schema=node_modules/@trycompai/db/dist/schema.prisma"]
+# Run migrations against the local workspace schema and migration history.
+CMD ["sh", "-lc", "cd packages/db && bunx prisma migrate deploy"]
 
 # =============================================================================
 # STAGE 3: App Builder
@@ -169,7 +168,9 @@ RUN cp packages/db/dist/schema.prisma apps/portal/prisma/schema.prisma
 
 # Ensure Next build has required public env at build-time
 ARG NEXT_PUBLIC_BETTER_AUTH_URL
+ARG NEXT_PUBLIC_API_URL
 ENV NEXT_PUBLIC_BETTER_AUTH_URL=$NEXT_PUBLIC_BETTER_AUTH_URL \
+    NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL \
     NEXT_TELEMETRY_DISABLED=1 NODE_ENV=production \
     NEXT_OUTPUT_STANDALONE=true \
     NODE_OPTIONS=--max_old_space_size=6144

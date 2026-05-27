@@ -21,7 +21,7 @@ services:
       target: migrator
     env_file:
       - packages/db/.env
-    command: sh -lc "bunx prisma generate --schema=node_modules/@trycompai/db/dist/schema.prisma && bun packages/db/prisma/seed/seed.js"
+    command: sh -lc "node packages/db/scripts/generate-prisma-client-js.js && bun packages/db/prisma/seed/seed.ts"
     logging: *default-logging
   app:
     build:
@@ -30,13 +30,21 @@ services:
       target: app
       args:
         NEXT_PUBLIC_BETTER_AUTH_URL: ${BETTER_AUTH_URL}
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+        NEXT_PUBLIC_PORTAL_URL: ${NEXT_PUBLIC_PORTAL_URL}
     ports:
       - '3000:3000'
     env_file:
       - apps/app/.env
     restart: unless-stopped
     healthcheck:
-      test: ['CMD-SHELL', 'curl -f http://localhost:3000/api/health || exit 1']
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "const h=process.env.HOSTNAME; fetch('http://'+h+':3000/api/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -49,13 +57,20 @@ services:
       target: portal
       args:
         NEXT_PUBLIC_BETTER_AUTH_URL: ${BETTER_AUTH_URL_PORTAL}
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
     ports:
       - '3002:3000'
     env_file:
       - apps/portal/.env
     restart: unless-stopped
     healthcheck:
-      test: ['CMD-SHELL', 'curl -f http://localhost:3000/ || exit 1']
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "const h=process.env.HOSTNAME; fetch('http://'+h+':3000/').then((r)=>process.exit(r.status<400?0:1)).catch(()=>process.exit(1))",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3

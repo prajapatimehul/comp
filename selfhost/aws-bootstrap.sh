@@ -17,7 +17,14 @@ PROJECT="${PROJECT_TAG:-compliance}"
 
 echo "==> Using profile=$PROFILE region=$REGION tag=Project=$PROJECT"
 
-OPERATOR_IP=$(curl -s4 ifconfig.me)
+if command -v curl >/dev/null 2>&1; then
+  OPERATOR_IP=$(curl -s4 ifconfig.me)
+elif command -v node >/dev/null 2>&1; then
+  OPERATOR_IP=$(node -e 'fetch("https://ifconfig.me/ip").then((r) => r.text()).then((ip) => process.stdout.write(ip.trim())).catch(() => process.exit(1))')
+else
+  echo "ERROR: curl or node is required to discover the operator IP for SSH ingress" >&2
+  exit 1
+fi
 echo "==> Operator IP: $OPERATOR_IP"
 
 AMI=$(aws ec2 describe-images --profile "$PROFILE" --region "$REGION" \
@@ -33,16 +40,34 @@ SUBNET=$(aws ec2 describe-subnets --profile "$PROFILE" --region "$REGION" \
 echo "==> VPC: $VPC  Subnet: $SUBNET"
 
 # Key pair
-KEY=~/.ssh/${PROJECT}-key.pem
+KEY="${KEY_PATH:-$HOME/.ssh/${PROJECT}-key.pem}"
+KEY_NAME="${PROJECT}-key"
+REMOTE_KEY=$(aws ec2 describe-key-pairs --profile "$PROFILE" --region "$REGION" \
+  --key-names "$KEY_NAME" --query 'KeyPairs[0].KeyName' --output text 2>/dev/null || true)
 if [ ! -f "$KEY" ]; then
+  if [ "$REMOTE_KEY" = "$KEY_NAME" ]; then
+    echo "ERROR: AWS key pair $KEY_NAME exists, but local private key is missing at $KEY" >&2
+    exit 1
+  fi
   aws ec2 create-key-pair --profile "$PROFILE" --region "$REGION" \
-    --key-name "${PROJECT}-key" --key-type ed25519 --key-format pem \
+    --key-name "$KEY_NAME" --key-type ed25519 --key-format pem \
     --tag-specifications "ResourceType=key-pair,Tags=[{Key=Project,Value=$PROJECT}]" \
     --query 'KeyMaterial' --output text > "$KEY"
   chmod 600 "$KEY"
   echo "==> Key pair created at $KEY"
 else
-  echo "==> Key pair already exists at $KEY"
+  chmod 600 "$KEY"
+  if [ "$REMOTE_KEY" != "$KEY_NAME" ]; then
+    PUB=$(mktemp)
+    ssh-keygen -y -f "$KEY" > "$PUB"
+    aws ec2 import-key-pair --profile "$PROFILE" --region "$REGION" \
+      --key-name "$KEY_NAME" --public-key-material "fileb://$PUB" \
+      --tag-specifications "ResourceType=key-pair,Tags=[{Key=Project,Value=$PROJECT}]" >/dev/null
+    rm -f "$PUB"
+    echo "==> Imported existing local key to AWS as $KEY_NAME"
+  else
+    echo "==> Key pair already exists at $KEY"
+  fi
 fi
 
 # Security group
@@ -68,9 +93,9 @@ fi
 
 # Instance
 INSTANCE=$(aws ec2 run-instances --profile "$PROFILE" --region "$REGION" \
-  --image-id "$AMI" --instance-type t4g.large --key-name "${PROJECT}-key" \
+  --image-id "$AMI" --instance-type t4g.large --key-name "$KEY_NAME" \
   --security-group-ids "$SG" --subnet-id "$SUBNET" --associate-public-ip-address \
-  --block-device-mappings '[{"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":20,"VolumeType":"gp3","DeleteOnTermination":true,"Encrypted":true}}]' \
+  --block-device-mappings '[{"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":40,"VolumeType":"gp3","DeleteOnTermination":true,"Encrypted":true}}]' \
   --user-data "file://$(dirname "$0")/userdata.sh" \
   --metadata-options 'HttpTokens=required,HttpEndpoint=enabled' \
   --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${PROJECT}-app},{Key=Project,Value=$PROJECT}]" \

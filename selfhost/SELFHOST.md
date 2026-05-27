@@ -30,9 +30,12 @@ This branch adds:
 ## Quick start (single-host, AWS EC2)
 
 Prereqs:
-- AWS account + named CLI profile with EC2 + EIP permissions
-- Trigger.dev account + a project (free tier OK) — required to complete onboarding
-- (optional) Resend, OpenAI, Firecrawl, S3 bucket — features that need them error gracefully if blank
+- AWS account + named CLI profile with EC2, EIP, S3, and IAM permissions
+- Docker host with at least 8 GB RAM for builds
+- (optional) Trigger.dev workers for background jobs. Without workers, run
+  `selfhost/post-onboarding.sql` after the first org is created.
+- (optional) Resend, OpenAI, Firecrawl. Login still works without Resend because
+  `api-patch.sh` logs magic links to API stdout.
 
 ```bash
 # 1. Provision EC2 + EIP + SG + key pair
@@ -45,7 +48,15 @@ ssh -i ~/.ssh/compliance-key.pem ec2-user@$PUBLIC_IP "mkdir -p /opt/compliance"
 rsync -e "ssh -i ~/.ssh/compliance-key.pem" -av --exclude='.git' --exclude='node_modules' \
   ./ ec2-user@$PUBLIC_IP:/opt/compliance/
 
-# 3. SSH in and create env files
+# 3. Provision S3 storage from your workstation
+AWS_PROFILE=crypto AWS_REGION=ap-south-1 \
+APP_ORIGINS=http://${PUBLIC_IP}:3000,http://${PUBLIC_IP}:3002 \
+./selfhost/provision-s3.sh
+# Save the bucket name and access keys printed in selfhost/.s3-out.
+# If you already pushed the repo, copy .s3-out to the host or keep the
+# terminal output handy while creating env files. Do not commit .s3-out.
+
+# 4. SSH in and create env files
 ssh -i ~/.ssh/compliance-key.pem ec2-user@$PUBLIC_IP
 cd /opt/compliance
 
@@ -65,8 +76,9 @@ cp selfhost/.env.app.example apps/app/.env       # sed in PG_PASSWORD, SRH_TOKEN
 cp selfhost/.env.portal.example apps/portal/.env # sed in PG_PASSWORD, SRH_TOKEN, PUBLIC_IP, BETTER_AUTH_SECRET, INTERNAL_API_TOKEN
 cp selfhost/.env.api.example apps/api/.env       # sed in everything from above + SERVICE_TOKEN_*
 cp selfhost/.env.db.example packages/db/.env     # sed in PG_PASSWORD
+# Also sed in the S3 bucket and keys from the S3 provisioning output.
 
-# 4. Postgres TLS cert (Comp AI's Prisma client demands TLS)
+# 5. Postgres TLS cert (Comp AI's Prisma client demands TLS)
 mkdir -p selfhost/pg-tls
 openssl req -new -x509 -days 365 -nodes \
   -out selfhost/pg-tls/server.crt -keyout selfhost/pg-tls/server.key \
@@ -74,23 +86,25 @@ openssl req -new -x509 -days 365 -nodes \
 sudo chown 70:70 selfhost/pg-tls/server.{crt,key}
 sudo chmod 600 selfhost/pg-tls/server.key
 
-# 5. Build (sequential is safer; parallel is ~2x faster on 8 GB RAM)
+# 6. Build (sequential is safer; parallel is ~2x faster on 8 GB RAM)
 export PG_PASSWORD SRH_TOKEN
 export BETTER_AUTH_URL=http://${PUBLIC_IP}:3000
 export BETTER_AUTH_URL_PORTAL=http://${PUBLIC_IP}:3002
+export NEXT_PUBLIC_API_URL=http://${PUBLIC_IP}:3333
+export NEXT_PUBLIC_PORTAL_URL=http://${PUBLIC_IP}:3002
 COMPOSE="docker compose -f docker-compose.yml -f selfhost/docker-compose.selfhost.yml"
 $COMPOSE build api          # ~10–15 min
 $COMPOSE build app portal   # ~10–15 min
 
-# 6. Bring up infra, run migrations
+# 7. Bring up infra, run migrations, seed templates
 $COMPOSE up -d db redis srh
 $COMPOSE run --rm migrator
-$COMPOSE run --rm seeder    # ⚠️ KNOWN BROKEN — see "Seeder" below
+./selfhost/run-seeder.sh
 
-# 7. Start app servers
+# 8. Start app servers
 $COMPOSE up -d api app portal
 
-# 8. Verify
+# 9. Verify
 curl -sS -o /dev/null -w "api: %{http_code}\n"    http://${PUBLIC_IP}:3333/v1/health
 curl -sSL -o /dev/null -w "app: %{http_code}\n"   http://${PUBLIC_IP}:3000
 curl -sS -o /dev/null -w "portal: %{http_code}\n" http://${PUBLIC_IP}:3002
@@ -108,6 +122,15 @@ Sign in:
   ```
   Open the URL it prints — single use, expires in 1 hour. The session cookie is set on
   the redirect to `/`.
+
+After the first org finishes onboarding, clear the Trigger.dev completion flags if
+workers are not deployed:
+
+```bash
+$COMPOSE exec -T db psql -U comp -d comp \
+  -v ORG_ID="'org_xxxxxxxxxxx'" \
+  -f selfhost/post-onboarding.sql
+```
 
 ## Resize down for steady state
 
@@ -162,17 +185,17 @@ bug, not a workaround.
 
 ## Known issues (todo)
 
-- **Seeder.** `bun packages/db/prisma/seed/seed.js` errors with
-  `Cannot find module '@prisma/adapter-pg'`. The `migrator` Dockerfile target only
-  installs `prisma` + `@prisma/client`, not the adapter — but the seed script imports
-  `@prisma/adapter-pg`. Fix: add `@prisma/adapter-pg` and `pg` to the migrator stage's
-  inline `package.json`. Until then, the dashboard shows "no policies / frameworks".
+- **Seeder path is special.** Do not use a plain `$COMPOSE run --rm seeder` if
+  you are unsure which image version you built. Use `./selfhost/run-seeder.sh`.
+  It runs the local Prisma client generator and then executes
+  `packages/db/prisma/seed/seed.ts`, which is the path verified on a clean AWS
+  self-host.
 - **No HTTPS / no domain.** Naked HTTP on the EIP. Cookies are non-secure. Add a Caddy
   service in front of port 80 with auto-Let's-Encrypt, point a subdomain at the EIP, and
   rebuild app+portal (because `NEXT_PUBLIC_API_URL` is baked in).
 - **Auth UI is magic-link only.** `/auth` doesn't expose email+password. Operators with
-  no Resend can't sign in via the UI; they have to call `/api/auth/sign-in/email` directly
-  with curl, or insert a Better-Auth-format scrypt hash via SQL.
+  no Resend can still sign in: call `/api/auth/sign-in/magic-link` directly with curl
+  and open the URL logged by `docker logs compliance-api-1`.
 
 ## Filing upstream
 
@@ -195,7 +218,7 @@ selfhost/
 ├── userdata.sh                    — EC2 cloud-init
 ├── aws-bootstrap.sh               — provision EC2 + EIP + SG + key (one-shot)
 ├── provision-s3.sh                — S3 bucket + scoped IAM user (one-shot)
-├── run-seeder.sh                  — seeder workaround (Prisma client path)
+├── run-seeder.sh                  — verified seeder runner
 ├── post-onboarding.sql            — clears "Setup needs attention" if no Trigger workers
 ├── pg-tls/                        — generate cert here at deploy time
 └── .env.{app,portal,api,db}.example — full env templates
@@ -205,14 +228,37 @@ Dockerfile                         — patched (vs upstream main): 4 fixes + see
 
 ---
 
+## Deployment gotchas checklist
+
+- **40 GB root volume minimum.** The monorepo build can fill a 20 GB disk.
+  Keep `VolumeSize` at `40` or larger in `selfhost/aws-bootstrap.sh`.
+- **S3 in `us-east-1` is special.** `create-bucket` must omit
+  `LocationConstraint` in `us-east-1`; `selfhost/provision-s3.sh` handles this.
+- **`NEXT_PUBLIC_API_URL` is baked into app/portal images.** Export
+  `NEXT_PUBLIC_API_URL=http://${PUBLIC_IP}:3333` before building. If it is
+  missing, the browser bundle falls back to localhost and onboarding cannot load
+  frameworks.
+- **`NEXT_PUBLIC_PORTAL_URL` is also a build arg for app.** Export
+  `NEXT_PUBLIC_PORTAL_URL=http://${PUBLIC_IP}:3002` before building app.
+- **Stop app/portal/api before rebuilding on an 8 GB host.** It frees enough
+  memory for Next.js type checking and avoids SSH timeouts during build.
+- **Do not run `docker system prune -af --volumes`.** It can delete stopped app
+  images and Postgres data. Use `docker buildx prune -f` or a targeted prune.
+- **No-Resend login is expected.** Magic links and OTPs are logged to API stdout
+  by `api-patch.sh`; use `docker logs --since 30s compliance-api-1`.
+- **Run post-onboarding SQL when Trigger workers are absent.** It clears the
+  setup warning after the org has been created and initialized.
+
+---
+
 ## Day-2 lessons (things that bit us a second time)
 
 ### 1. EBS 20 GB is not enough
 
 Docker BuildKit cache + workspace `node_modules` + multiple builder stages
 will fill 20 GB. We hit `error: An internal error occurred (NoSpaceLeft)`
-mid-build. **Provision 40 GB upfront** — `aws-bootstrap.sh` defaults to 20 GB,
-increase the `VolumeSize` value before running, or expand later with
+mid-build. **Provision 40 GB upfront** — `aws-bootstrap.sh` now defaults to 40 GB.
+If you already launched a smaller volume, expand it with
 `aws ec2 modify-volume` + `growpart` + `xfs_growfs`.
 
 ### 2. `docker system prune -af --volumes` is destructive
@@ -222,16 +268,15 @@ app/portal/api containers (e.g. to free RAM during a build), prune will
 delete those images and you'll have to rebuild everything. Use
 `docker buildx prune -f` or a more targeted prune instead.
 
-### 3. The seeder is broken even with the right deps
+### 3. Use `run-seeder.sh`, not the old published-schema path
 
-We patched the migrator stage to install `@prisma/adapter-pg` + `pg` (so
-seed.ts imports work). But the seeder still fails because `prisma generate`
-writes the client to `node_modules/@trycompai/db/node_modules/@prisma/client`
-(nested, relative to the schema's location) while seed.ts imports
-`@prisma/client` from the outer `node_modules/`, which is the unfilled stub.
+The old seeder path used `node_modules/@trycompai/db/dist/schema.prisma` and
+`seed.js`; that can leave Prisma pointing at the wrong generated client. The
+verified path is `./selfhost/run-seeder.sh`, which runs the local generator
+(`packages/db/scripts/generate-prisma-client-js.js`) and then executes
+`packages/db/prisma/seed/seed.ts`.
 
-**Fix:** `selfhost/run-seeder.sh` copies the nested generated client over
-the outer stub before running seed. After it succeeds you'll have:
+After it succeeds you'll have:
 - 17 frameworks (SOC 2, ISO 27001, HIPAA, GDPR, NIST CSF, NIST 800-53,
   PCI DSS, ISO 42001, ISO 9001, NEN 7510, NIS 2, etc.)
 - 50 control templates
@@ -275,7 +320,7 @@ dashboard works fine without the AI-tailoring background layer. Run
 the warning banner:
 
 ```bash
-docker compose exec -T db psql -U comp -d comp \
+$COMPOSE exec -T db psql -U comp -d comp \
   -v ORG_ID="'org_xxxxxxxxxxx'" \
   -f selfhost/post-onboarding.sql
 ```
